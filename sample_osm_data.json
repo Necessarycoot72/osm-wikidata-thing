@@ -1,0 +1,45 @@
+{
+  "elements": [
+    {
+      "type": "node",
+      "id": 12345,
+      "tags": {
+        "name": "Test Feature 1 (Match)",
+        "gnis:feature_id": "101"
+      }
+    },
+    {
+      "type": "way",
+      "id": 67890,
+      "tags": {
+        "name": "Test Feature 2 (No GNIS Match)",
+        "gnis:feature_id": "102"
+      }
+    },
+    {
+      "type": "node",
+      "id": 11223,
+      "tags": {
+        "name": "Test Feature 3 (Has Wikidata)",
+        "gnis:feature_id": "103",
+        "wikidata": "Q999"
+      }
+    },
+    {
+      "type": "relation",
+      "id": 44556,
+      "tags": {
+        "name": "Test Feature 4 (Match)",
+        "gnis:feature_id": "104"
+      }
+    },
+    {
+      "type": "node",
+      "id": 77889,
+      "tags": {
+        "name": "Test Feature 5 (GNIS Error Sim)",
+        "gnis:feature_id": "105"
+      }
+    }
+  ]
+}

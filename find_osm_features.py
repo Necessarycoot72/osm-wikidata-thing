@@ -493,14 +493,15 @@ async def main_async(query_timeout):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Fetch OSM features with GNIS IDs and check for corresponding Wikidata entries.")
     parser.add_argument(
-        "--timeout",
+        "--overpass-timeout",
+        dest="overpass_timeout",
         type=int,
         default=None, # Default to None, will be handled by interactive prompt or hardcoded default.
-        help="Timeout in seconds for the Overpass API query. If not provided, script will prompt or use a default."
+        help="Overpass API query timeout in seconds. If not provided, script will prompt or use a default."
     )
     args = parser.parse_args()
 
-    effective_timeout = args.timeout # Use timeout from CLI if provided.
+    effective_timeout = args.overpass_timeout # Use timeout from CLI if provided.
 
     if effective_timeout is None: # No CLI timeout, prompt user or use hardcoded default.
         try:
@@ -511,16 +512,16 @@ if __name__ == "__main__":
             else:
                 effective_timeout = int(user_input_timeout_str)
                 if effective_timeout <= 0: # Ensure positive timeout.
-                    logging.warning("Timeout must be a positive integer. Using default 10000 seconds.")
+                    logging.warning("Overpass API timeout must be a positive integer. Using default 10000 seconds.")
                     effective_timeout = 10000
                 else:
                     logging.info(f"User-defined Overpass API timeout: {effective_timeout} seconds.")
         except ValueError: # Non-integer input.
-            logging.warning("Invalid input for timeout (not an integer). Using default 10000 seconds.")
+            logging.warning("Invalid input for Overpass API timeout (not an integer). Using default 10000 seconds.")
             effective_timeout = 10000
     else: # CLI argument was provided and is not None.
         if effective_timeout <= 0: # Validate CLI timeout.
-            logging.warning(f"CLI timeout value --timeout {args.timeout} is not positive. Using default 10000 seconds.")
+            logging.warning(f"CLI value --overpass-timeout {args.overpass_timeout} is not positive. Using default 10000 seconds.")
             effective_timeout = 10000
         else:
             logging.info(f"Using Overpass API timeout from CLI argument: {effective_timeout} seconds.")

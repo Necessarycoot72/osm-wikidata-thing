@@ -1,13 +1,15 @@
-# OSM Feature Finder for Wikidata Matching
+# openstreetmap - Wikidata gnis conflator
 
 ## Description
 
-This script identifies OpenStreetMap (OSM) features that meet specific criteria indicating they might need a Wikidata tag added. The criteria are:
-1. The OSM feature has a `gnis:feature_id` tag.
-2. The OSM feature does *not* currently have a `wikidata` tag.
-3. A corresponding Wikidata entry exists that has the same GNIS ID (Wikidata property P590) as the `gnis:feature_id` tag on the OSM feature.
+this script is meant to find osm features that lack the wikidata tag by conflating the gnis tag with a matching QID
 
-The script queries the Overpass API for OSM data and the Wikidata Query Service for Wikidata information.
+the logic of the program goes as follows
+
+1: call the overpass api, then cull the data to keep only unique gnis fetures. (in testing this tends to be rivers that should be in a relastion, but thats out of scope for this program.) discarded gnis tags are exported to a seprate json file.
+2: call SPARQL for indivudal gnis codes.
+4: 
+5: once complete, a json file with the the node and 
 
 ## Requirements
 

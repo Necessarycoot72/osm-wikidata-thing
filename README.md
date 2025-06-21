@@ -7,7 +7,7 @@ the logic of the program goes as follows
 
 1: call the overpass API, then cull the data to keep only unique GNIS features. (in testing, this tends to be rivers that should be in a relation, but that's out of scope for this program.) discarded features are exported to a separate JSON file.
 2: call SPARQL for individual GNIS codes.
-3: once complete, a JSON file with the  
+3: once completeed the script will exit and a JSON file named "osm_features_to_update" be created in the root folder.
 
 ## Requirements
 

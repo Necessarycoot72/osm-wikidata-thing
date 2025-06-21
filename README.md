@@ -37,7 +37,7 @@ python find_osm_features.py [--timeout <seconds>]
 ## Output
 
 *   **Console Logs:** The script prints info messages and error logs to the console during its execution.
-*   **JSON File:** The primary output is a JSON file named `osm_features_to_update.json`. This file contains a list of OSM features that meet all the specified criteria. Each item in the list is a JSON object with the following structure:
+*   **JSON File:** The primary output is a JSON file named `osm_features_to_update.json`. This file contains a list of OSM features that meet all the specified criteria. Each item in the list is a JSON object with the following structure: NEEDS TO BE UPDATED
     ```json
     {
         "osm_id": 12345, // OSM element ID

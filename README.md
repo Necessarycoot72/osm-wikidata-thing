@@ -1,8 +1,6 @@
 
 # openstreetmap - Wikidata gnis conflator
 
-## Description
-
 this script finds osm features that lack the `wikidata` tag by conflating the GNIS tag with a matching QID
 
 the logic of the program goes as follows

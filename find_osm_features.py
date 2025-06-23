@@ -32,9 +32,13 @@ WIKIDATA_SPARQL_URL = "https://query.wikidata.org/sparql"
 BASE_OVERPASS_QUERY = """
 [out:json][timeout:{timeout}];
 (
-  nwr["gnis:feature_id"];
+  node["gnis:feature_id"];
+  way["gnis:feature_id"];
+  relation["gnis:feature_id"];
 );
-out ids;
+out body;
+>;
+out skel qt;
 """
 SPARQL_QUERY = """
 SELECT ?item WHERE {{

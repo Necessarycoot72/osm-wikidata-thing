@@ -135,6 +135,7 @@ def sigint_handler(signum, frame):
     logging.info(f"SIGINT (Ctrl+C) received (signal {signum}). Attempting to save progress before exiting...")
     # Access global variables directly as this is a signal handler context.
     _save_current_progress(global_raw_overpass_data, current_features_to_check_for_resume, current_results_for_resume)
+    logging.info("Progress saving attempt concluded. Exiting now.") # Added message
     sys.exit(0) # Exit after attempting to save.
 
 def setup_signal_handlers():

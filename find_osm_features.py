@@ -32,9 +32,7 @@ WIKIDATA_SPARQL_URL = "https://query.wikidata.org/sparql"
 BASE_OVERPASS_QUERY = """
 [out:json][timeout:{timeout}];
 (
-  node["gnis:feature_id"];
-  way["gnis:feature_id"];
-  relation["gnis:feature_id"];
+  nwr["gnis:feature_id"];
 );
 out body;
 >;

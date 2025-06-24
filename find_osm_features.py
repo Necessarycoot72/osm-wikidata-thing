@@ -90,9 +90,9 @@ async def find_wikidata_entry_by_gnis_id(session, gnis_id, max_retries=3):
 
 def _save_current_progress(raw_overpass_data_cache, features_to_check, results_to_save):
     """Core logic for saving current progress to resume_state.json."""
-    logging.info(f"Attempting to save current progress to {target_file}...") # target_file is defined below, this is a slight forward reference but acceptable for logging.
+    target_file = 'resume_state.json' # Moved to the beginning
+    logging.info(f"Attempting to save current progress to {target_file}...")
 
-    target_file = 'resume_state.json'
     temp_file = f"{target_file}.tmp" # Define temp_file based on target_file for clarity
 
     data_to_save = {
@@ -103,8 +103,17 @@ def _save_current_progress(raw_overpass_data_cache, features_to_check, results_t
 
     # Phase 1: Write to temporary file
     try:
+        logging.info(f"Data to save: "
+                     f"raw_overpass_data_cache items: {len(raw_overpass_data_cache) if raw_overpass_data_cache else 'N/A'}, "
+                     f"features_to_check items: {len(features_to_check)}, "
+                     f"results_to_save items: {len(results_to_save)}")
+
+        json_dump_start_time = time.time()
         with open(temp_file, 'w', encoding='utf-8') as f:
             json.dump(data_to_save, f) # Using compact JSON for efficiency
+        json_dump_end_time = time.time()
+        logging.info(f"json.dump() took {json_dump_end_time - json_dump_start_time:.2f} seconds.")
+
     except Exception as e: # Catching a broad exception as various issues can occur during file I/O
         logging.error(f"Failed to write progress to temporary file {temp_file}: {e}")
         if os.path.exists(temp_file): # Attempt cleanup if temp file was created
@@ -132,10 +141,31 @@ def _save_current_progress(raw_overpass_data_cache, features_to_check, results_t
 # Signal handler for SIGINT (Ctrl+C)
 def sigint_handler(signum, frame):
     """Handles SIGINT signal (Ctrl+C) by saving progress and exiting."""
-    logging.info(f"SIGINT (Ctrl+C) received (signal {signum}). Attempting to save progress before exiting...")
+    logging.info(f"SIGINT (Ctrl+C) received (signal {signum}). Attempting graceful shutdown and progress saving...")
+
+    # Attempt to cancel all running asyncio tasks
+    # This is a best-effort approach within a synchronous signal handler.
+    # Ideally, the asyncio loop should handle this, but direct cancellation can help.
+    try:
+        loop = asyncio.get_running_loop()
+        tasks = [task for task in asyncio.all_tasks(loop=loop) if not task.done()]
+        if tasks:
+            logging.info(f"Attempting to cancel {len(tasks)} running asyncio tasks...")
+            for task in tasks:
+                task.cancel()
+            # Note: We are not awaiting tasks here as this is a synchronous signal handler.
+            # The cancellation requests are issued, and the loop might process them if it gets control before exit.
+            logging.info("Asyncio task cancellation requests issued.")
+        else:
+            logging.info("No running asyncio tasks found to cancel.")
+    except RuntimeError:
+        logging.warning("No running asyncio event loop found, cannot cancel tasks.")
+    except Exception as e:
+        logging.error(f"Error during asyncio task cancellation: {e}")
+
     # Access global variables directly as this is a signal handler context.
     _save_current_progress(global_raw_overpass_data, current_features_to_check_for_resume, current_results_for_resume)
-    logging.info("Progress saving attempt concluded. Exiting now.") # Added message
+    logging.info("Progress saving attempt concluded. Exiting now.")
     sys.exit(0) # Exit after attempting to save.
 
 def setup_signal_handlers():

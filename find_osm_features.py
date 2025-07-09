@@ -260,25 +260,26 @@ def load_progress():
         logging.info("No resume_state.json found. Starting a fresh session.")
         return None, [], []
 
-async def process_features_concurrently(features_to_check, session, concurrency_limit=5):
+async def process_features_concurrently(features_to_check, session, master_results_list, results_lock, concurrency_limit=5):
     """Concurrently processes features to find Wikidata entries using a semaphore for rate limiting,
-    with sequential logging of results."""
+    with sequential logging of results and direct update to a master results list."""
     if not features_to_check:
         logging.info("No features provided to process_features_concurrently for Wikidata lookup.")
-        return []
+        return 0 # Return 0 newly added items
 
     results_queue = asyncio.Queue()
     total_features = len(features_to_check)
 
-    # Start the sequential logging coroutine as a background task
-    # Note: `session` here is the aiohttp ClientSession passed to process_features_concurrently
     logging_task = asyncio.create_task(
         log_results_sequentially(results_queue, total_features)
     )
 
     semaphore = asyncio.Semaphore(concurrency_limit)
 
-    async def process_feature(feature, original_index, queue_to_put_on, http_session):
+    # Record length of master_results_list before processing this batch
+    initial_master_results_len = len(master_results_list)
+
+    async def process_feature(feature, original_index, queue_to_put_on, http_session, current_master_results_list, current_results_lock):
         # This inner function processes a single feature.
         gnis_id = feature['tags']['gnis:feature_id']
         name = feature['tags'].get('name', 'N/A')
@@ -293,37 +294,51 @@ async def process_features_concurrently(features_to_check, session, concurrency_
 
             if wikidata_id:
                 status = "Found"
+                # If found, construct feature_data and add to the shared master_results_list
+                feature_data = {
+                    'osm_type': osm_type,
+                    'osm_id': osm_id,
+                    'name': name,
+                    'gnis_id': gnis_id,
+                    'wikidata_id': wikidata_id
+                }
+                async with results_lock:
+                    master_results_list.append(feature_data)
 
         except Exception as e:
             logging.error(f"Exception during Wikidata lookup for GNIS ID {gnis_id} (idx: {original_index}): {e}", exc_info=False)
             status = f"Error during lookup: {type(e).__name__}"
             # wikidata_id remains None
 
-        result_dict = {
+        # This dictionary is for the logging queue
+        result_dict_for_logging = {
             'original_index': original_index,
             'gnis_id': gnis_id,
-            'wikidata_id': wikidata_id,
+            'wikidata_id': wikidata_id, # Can be None if not found or error
             'name': name,
             'osm_type': osm_type,
             'osm_id': osm_id,
             'status': status
         }
 
-        await queue_to_put_on.put(result_dict) # Use queue_to_put_on
-        return result_dict
+        await queue_to_put_on.put(result_dict_for_logging)
+        # Return the same dict; the caller (process_features_concurrently) might use its status
+        # or other fields if needed, though primary result accumulation is now direct.
+        return result_dict_for_logging
 
     # Create tasks for processing features
-    # The outer `session` (aiohttp.ClientSession) is passed as `http_session` to process_feature
+    # Pass master_results_list and results_lock to each process_feature task
     feature_processing_tasks = [
-        process_feature(feature, idx, results_queue, session)
+        process_feature(feature, idx, results_queue, session, master_results_list, results_lock)
         for idx, feature in enumerate(features_to_check)
     ]
 
-    # Gather results from all feature processing tasks
-    # These results are the dictionaries that were also put on the queue
-    gathered_task_outputs = await asyncio.gather(*feature_processing_tasks, return_exceptions=True)
+    # Gather results (dictionaries for logging) from all feature processing tasks
+    # These dicts are also used if we need to inspect status post-hoc, but primary accumulation
+    # for saving is now directly into master_results_list.
+    gathered_logging_dicts = await asyncio.gather(*feature_processing_tasks, return_exceptions=True)
 
-    # Signal the logging task that all producer tasks are done by putting sentinel on the queue
+    # Signal the logging task that all producer tasks are done
     await results_queue.put(LOGGING_SENTINEL)
 
     # Wait for the logging task to finish processing all queued items
@@ -332,35 +347,22 @@ async def process_features_concurrently(features_to_check, session, concurrency_
     except asyncio.CancelledError:
         logging.info("Logging task was cancelled during shutdown of process_features_concurrently.")
 
+    # Calculate how many items were newly added to master_results_list
+    final_master_results_len = len(master_results_list)
+    newly_added_count = final_master_results_len - initial_master_results_len
 
-    # Now, build local_results from gathered_task_outputs for the final JSON output
-    local_results = []
-    for i, item_output in enumerate(gathered_task_outputs):
+    # Log any tasks that failed with an unhandled exception (i.e., didn't return a dict)
+    for i, item_output in enumerate(gathered_logging_dicts):
         if isinstance(item_output, Exception):
-            # This means the process_feature task itself crashed.
-            # The error should have been logged within process_feature's except block if it was a lookup error.
-            # If it's a different error, or if process_feature didn't catch it before returning, log here.
-            # The `result_dict` put on the queue by process_feature would have status "Error during lookup..."
-            # This is for unhandled exceptions within the task body itself.
-            # We need the original feature to log its GNIS ID if the task failed before creating result_dict
-            original_feature = features_to_check[i] # Assuming gather preserves order for exceptions
+            original_feature = features_to_check[i]
             gnis_id_for_error = original_feature.get('tags', {}).get('gnis:feature_id', f'Unknown_at_original_index_{i}')
             logging.error(f"Task for GNIS ID {gnis_id_for_error} (original index {i}) failed with unhandled exception: {item_output}", exc_info=False)
-        elif isinstance(item_output, dict): # This is the expected result_dict
-            # We only add to local_results if Wikidata ID was found and status is "Found"
-            if item_output.get('wikidata_id') and item_output.get('status') == "Found":
-                feature_data = {
-                    'osm_type': item_output['osm_type'],
-                    'osm_id': item_output['osm_id'],
-                    'name': item_output['name'],
-                    'gnis_id': item_output['gnis_id'],
-                    'wikidata_id': item_output['wikidata_id']
-                }
-                local_results.append(feature_data)
-        # No action for other cases (e.g. status "Not found" or "Error during lookup" from successful task completion)
-        # as these are logged by the logger, and we only want successful matches in local_results.
+            # Note: if process_feature crashes before putting to queue, the logger won't know about this item.
+            # The total_features_to_log for the logger might seem off by one in such rare cases if not handled.
+            # However, process_feature is designed to catch its own lookup errors and return a dict.
+            # This handles crashes within process_feature itself.
 
-    return local_results
+    return newly_added_count
 
 # Note: The generate_paginated_html_report function was previously removed.
 
@@ -509,32 +511,37 @@ async def fetch_and_prepare_osm_data(query_timeout, processed_gnis_ids_from_load
     return features_for_processing_this_run, raw_data_defining_current_scope, effective_raw_overpass_cache
 
 
-async def process_wikidata_lookups(features_to_process_list, current_results_list):
+async def process_wikidata_lookups(features_to_process_list, master_results_list):
     """Processes a list of features to find corresponding Wikidata entries by their GNIS ID.
-    Appends successfully found matches to the current_results_list."""
+    The `master_results_list` is updated in-place by sub-functions."""
 
     if not features_to_process_list:
         logging.info("No features provided for Wikidata lookup in this batch.")
-        return current_results_list # Return the list as is.
+        return master_results_list # Return the list as is (it wasn't touched)
 
-    # Ensure current_results_list is a list, even if None was passed.
-    # This function will extend this list.
-    output_results_list = list(current_results_list) if current_results_list is not None else []
+    # `master_results_list` is the shared list that will be modified by process_features_concurrently.
+    # It's passed by reference.
 
-    # Using a ClientSession for connection pooling and to set a User-Agent.
-    # The User-Agent is important for responsible API interaction.
+    results_lock = asyncio.Lock() # Create a lock for concurrent appends to master_results_list
+
     headers = {'User-Agent': 'OSM-Wikidata-Updater/1.0 (contact: your.email@example.com; script: find_osm_features.py)'}
     async with aiohttp.ClientSession(headers=headers) as session:
-        # process_features_concurrently handles the actual lookups and returns new findings.
-        newly_found_results = await process_features_concurrently(features_to_process_list, session, concurrency_limit=5)
+        # process_features_concurrently will now update master_results_list directly
+        # and return the count of newly added items.
+        count_newly_added = await process_features_concurrently(
+            features_to_process_list,
+            session,
+            master_results_list, # Pass the shared list
+            results_lock,        # Pass the lock
+            concurrency_limit=5
+        )
 
-        if newly_found_results:
-            output_results_list.extend(newly_found_results)
-            logging.info(f"Wikidata lookup phase added {len(newly_found_results)} new results to the main list.")
+        if count_newly_added > 0:
+            logging.info(f"Wikidata lookup phase added {count_newly_added} new results to the main list.")
         else:
-            logging.info("Wikidata lookup phase completed, but no new results were found for this batch of features.")
+            logging.info("Wikidata lookup phase completed, but no new results were found (or added) for this batch of features.")
 
-    return output_results_list
+    return master_results_list # Return the (potentially modified) list
 
 async def save_final_results_and_cleanup(final_results_list):
     """Saves final results to JSON and cleans up resume state."""
@@ -624,8 +631,12 @@ async def main_async(query_timeout):
 
     # Step 3: Process Wikidata Lookups
     if features_for_processing_this_run:
+        # current_results_for_resume is passed to process_wikidata_lookups,
+        # which will pass it down to be modified in place.
+        # The function returns the same list object, so assignment is okay.
         current_results_for_resume = await process_wikidata_lookups(
-            features_for_processing_this_run, current_results_for_resume
+            features_for_processing_this_run,
+            current_results_for_resume # This is the master list to be updated
         )
     else:
         logging.info("No features to submit for Wikidata lookup in this run.")

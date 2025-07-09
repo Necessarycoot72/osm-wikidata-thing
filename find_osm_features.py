@@ -298,7 +298,7 @@ async def fetch_and_prepare_osm_data(query_timeout, processed_gnis_ids_from_load
              raw_data_defining_current_scope = None
 
     if attempt_live_api_fetch:
-        logging.info("Attempting to fetch new data from Overpass API.")
+        logging.info("Attempting to fetch new data from Overpass API. This may take some time")
         try:
             fetched_data = fetch_osm_features_with_gnis_id(query_timeout)
             fetched_data_elements = fetch_osm_features_with_gnis_id(query_timeout)

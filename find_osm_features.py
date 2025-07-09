@@ -12,26 +12,7 @@ import sys
 import collections
 
 # Configure logging
-# logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-# Custom Formatter for fixed-width log lines
-FIXED_WIDTH = 150 # Define desired fixed width for log lines
-
-class FixedWidthFormatter(logging.Formatter):
-    def format(self, record):
-        log_entry = super().format(record)
-        return log_entry.ljust(FIXED_WIDTH)
-
-# Setup logger with custom formatter
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-
-# Console handler
-ch = logging.StreamHandler()
-ch.setLevel(logging.INFO)
-formatter = FixedWidthFormatter('%(asctime)s - %(levelname)s - %(message)s')
-ch.setFormatter(formatter)
-logger.addHandler(ch)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Global variables for managing state, primarily for signal handling and resume capabilities.
 # current_features_to_check_for_resume: List of features that define the current processing scope for resume purposes.
@@ -220,12 +201,19 @@ async def process_features_concurrently(features_to_check, session, concurrency_
 
     semaphore = asyncio.Semaphore(concurrency_limit)
     local_results = []
+    total_features = len(features_to_check)
+    processed_count = 0 # Shared counter for processed features
 
-    async def process_feature(feature):
+    async def process_feature(feature, current_index):
+        nonlocal processed_count # Allow modification of the shared counter
         # This inner function processes a single feature.
         async with semaphore: # Acquire semaphore before processing
             gnis_id = feature['tags']['gnis:feature_id']
             wikidata_id = await find_wikidata_entry_by_gnis_id(session, gnis_id)
+
+            processed_count += 1
+            remaining_count = total_features - processed_count
+
             if wikidata_id:
                 feature_data = {
                     'osm_type': feature['type'],
@@ -235,13 +223,14 @@ async def process_features_concurrently(features_to_check, session, concurrency_
                     'wikidata_id': wikidata_id
                 }
                 local_results.append(feature_data)
-                logging.info(f"Found Wikidata entry for GNIS ID {gnis_id}: {wikidata_id}")
+                logging.info(f"Found Wikidata entry for GNIS ID {gnis_id}: {wikidata_id} ({remaining_count} remaining)")
             else:
                 # Log at DEBUG level as this is common and not necessarily an error.
-                logging.debug(f"No Wikidata entry found for GNIS ID {gnis_id}")
+                logging.debug(f"No Wikidata entry found for GNIS ID {gnis_id} ({remaining_count} remaining)")
 
     # Create and run tasks for all features.
-    tasks = [process_feature(feature) for feature in features_to_check]
+    # Pass current_index to process_feature for logging if needed, though processed_count is more direct for remaining.
+    tasks = [process_feature(feature, idx) for idx, feature in enumerate(features_to_check)]
     await asyncio.gather(*tasks, return_exceptions=True) # return_exceptions=True ensures all tasks complete even if some fail.
     return local_results
 

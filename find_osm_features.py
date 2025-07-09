@@ -157,6 +157,73 @@ def setup_signal_handlers():
 # Note: Old Windows-specific console event handler code and related imports (PYWIN32_AVAILABLE, IS_WINDOWS, win32api, win32con)
 # have been previously removed as the solution now focuses on standard signal handling.
 
+# Sentinel value for queue termination
+LOGGING_SENTINEL = object()
+
+async def log_results_sequentially(results_queue, total_features_to_log):
+    """
+    Consumes results from a queue, buffers them, and logs them in sequential order.
+    """
+    buffered_results = {}
+    next_expected_log_index = 0
+    logged_items_count = 0 # Tracks how many items have actually been logged
+
+    # Loop until all items are logged or a clear termination signal for all items is processed.
+    # This condition might need refinement based on how producer completion is signaled.
+    while logged_items_count < total_features_to_log:
+        try:
+            # Wait for an item from the queue.
+            result = await results_queue.get()
+        except asyncio.CancelledError:
+            logging.info("Logging task cancelled.")
+            # Attempt to flush buffer before exiting on cancellation
+            break
+
+        if result is LOGGING_SENTINEL:
+            # This sentinel typically means producers are done.
+            # We break the loop and then try to flush any remaining items from the buffer.
+            results_queue.task_done() # Acknowledge the sentinel
+            break
+
+        if result:
+            buffered_results[result['original_index']] = result
+
+        results_queue.task_done() # Signal that this item from queue is processed (either stored or was None)
+
+        # Try to log all contiguous items starting from next_expected_log_index
+        while next_expected_log_index in buffered_results:
+            item_to_log = buffered_results.pop(next_expected_log_index)
+
+            log_line = f"Item {item_to_log['original_index'] + 1}/{total_features_to_log}: {item_to_log['status']} Wikidata for GNIS ID {item_to_log['gnis_id']}"
+            if item_to_log['wikidata_id'] and item_to_log['status'] == "Found":
+                log_line += f": {item_to_log['wikidata_id']}"
+
+            logging.info(log_line)
+            next_expected_log_index += 1
+            logged_items_count +=1
+
+    # After the loop (e.g. sentinel received or task cancelled), flush any remaining buffered items.
+    # This is crucial if items arrived out of order and the loop exited before they were all logged.
+    if buffered_results:
+        logging.debug(f"Flushing {len(buffered_results)} remaining buffered items...")
+        for index in sorted(buffered_results.keys()): # Process in order
+            if index >= next_expected_log_index: # Ensure not to re-log
+                item_to_log = buffered_results.pop(index)
+                log_line = f"Item {item_to_log['original_index'] + 1}/{total_features_to_log}: {item_to_log['status']} Wikidata for GNIS ID {item_to_log['gnis_id']}"
+                if item_to_log['wikidata_id'] and item_to_log['status'] == "Found":
+                    log_line += f": {item_to_log['wikidata_id']}"
+                logging.info(log_line)
+                logged_items_count +=1
+                # next_expected_log_index = index + 1 # Update in case of gaps filled now
+
+    if logged_items_count < total_features_to_log and total_features_to_log > 0:
+         logging.warning(f"Logging task finished, but only {logged_items_count}/{total_features_to_log} items were logged. This might indicate an issue.")
+    elif total_features_to_log == 0:
+        logging.info("Logging task initiated for zero features; nothing to log.")
+    else:
+        logging.info(f"Logging task completed. All {logged_items_count}/{total_features_to_log} items logged.")
+
+
 def load_progress():
     """Loads progress from resume_state.json if it exists."""
     if os.path.exists('resume_state.json'):
@@ -194,44 +261,105 @@ def load_progress():
         return None, [], []
 
 async def process_features_concurrently(features_to_check, session, concurrency_limit=5):
-    """Concurrently processes features to find Wikidata entries using a semaphore for rate limiting."""
+    """Concurrently processes features to find Wikidata entries using a semaphore for rate limiting,
+    with sequential logging of results."""
     if not features_to_check:
-        logging.info("No features provided to process_features_concurrently.")
+        logging.info("No features provided to process_features_concurrently for Wikidata lookup.")
         return []
 
-    semaphore = asyncio.Semaphore(concurrency_limit)
-    local_results = []
+    results_queue = asyncio.Queue()
     total_features = len(features_to_check)
-    processed_count = 0 # Shared counter for processed features
 
-    async def process_feature(feature, current_index):
-        nonlocal processed_count # Allow modification of the shared counter
+    # Start the sequential logging coroutine as a background task
+    # Note: `session` here is the aiohttp ClientSession passed to process_features_concurrently
+    logging_task = asyncio.create_task(
+        log_results_sequentially(results_queue, total_features)
+    )
+
+    semaphore = asyncio.Semaphore(concurrency_limit)
+
+    async def process_feature(feature, original_index, queue_to_put_on, http_session):
         # This inner function processes a single feature.
-        async with semaphore: # Acquire semaphore before processing
-            gnis_id = feature['tags']['gnis:feature_id']
-            wikidata_id = await find_wikidata_entry_by_gnis_id(session, gnis_id)
+        gnis_id = feature['tags']['gnis:feature_id']
+        name = feature['tags'].get('name', 'N/A')
+        osm_type = feature['type']
+        osm_id = feature['id']
+        wikidata_id = None
+        status = "Not found" # Default status
 
-            processed_count += 1
-            remaining_count = total_features - processed_count
+        try:
+            async with semaphore: # Acquire semaphore before processing
+                wikidata_id = await find_wikidata_entry_by_gnis_id(http_session, gnis_id) # Use http_session
 
             if wikidata_id:
+                status = "Found"
+
+        except Exception as e:
+            logging.error(f"Exception during Wikidata lookup for GNIS ID {gnis_id} (idx: {original_index}): {e}", exc_info=False)
+            status = f"Error during lookup: {type(e).__name__}"
+            # wikidata_id remains None
+
+        result_dict = {
+            'original_index': original_index,
+            'gnis_id': gnis_id,
+            'wikidata_id': wikidata_id,
+            'name': name,
+            'osm_type': osm_type,
+            'osm_id': osm_id,
+            'status': status
+        }
+
+        await queue_to_put_on.put(result_dict) # Use queue_to_put_on
+        return result_dict
+
+    # Create tasks for processing features
+    # The outer `session` (aiohttp.ClientSession) is passed as `http_session` to process_feature
+    feature_processing_tasks = [
+        process_feature(feature, idx, results_queue, session)
+        for idx, feature in enumerate(features_to_check)
+    ]
+
+    # Gather results from all feature processing tasks
+    # These results are the dictionaries that were also put on the queue
+    gathered_task_outputs = await asyncio.gather(*feature_processing_tasks, return_exceptions=True)
+
+    # Signal the logging task that all producer tasks are done by putting sentinel on the queue
+    await results_queue.put(LOGGING_SENTINEL)
+
+    # Wait for the logging task to finish processing all queued items
+    try:
+        await logging_task
+    except asyncio.CancelledError:
+        logging.info("Logging task was cancelled during shutdown of process_features_concurrently.")
+
+
+    # Now, build local_results from gathered_task_outputs for the final JSON output
+    local_results = []
+    for i, item_output in enumerate(gathered_task_outputs):
+        if isinstance(item_output, Exception):
+            # This means the process_feature task itself crashed.
+            # The error should have been logged within process_feature's except block if it was a lookup error.
+            # If it's a different error, or if process_feature didn't catch it before returning, log here.
+            # The `result_dict` put on the queue by process_feature would have status "Error during lookup..."
+            # This is for unhandled exceptions within the task body itself.
+            # We need the original feature to log its GNIS ID if the task failed before creating result_dict
+            original_feature = features_to_check[i] # Assuming gather preserves order for exceptions
+            gnis_id_for_error = original_feature.get('tags', {}).get('gnis:feature_id', f'Unknown_at_original_index_{i}')
+            logging.error(f"Task for GNIS ID {gnis_id_for_error} (original index {i}) failed with unhandled exception: {item_output}", exc_info=False)
+        elif isinstance(item_output, dict): # This is the expected result_dict
+            # We only add to local_results if Wikidata ID was found and status is "Found"
+            if item_output.get('wikidata_id') and item_output.get('status') == "Found":
                 feature_data = {
-                    'osm_type': feature['type'],
-                    'osm_id': feature['id'],
-                    'name': feature['tags'].get('name', 'N/A'), # Safely get 'name'
-                    'gnis_id': gnis_id,
-                    'wikidata_id': wikidata_id
+                    'osm_type': item_output['osm_type'],
+                    'osm_id': item_output['osm_id'],
+                    'name': item_output['name'],
+                    'gnis_id': item_output['gnis_id'],
+                    'wikidata_id': item_output['wikidata_id']
                 }
                 local_results.append(feature_data)
-                logging.info(f"Found Wikidata entry for GNIS ID {gnis_id}: {wikidata_id} ({remaining_count} remaining)")
-            else:
-                # Log at DEBUG level as this is common and not necessarily an error.
-                logging.debug(f"No Wikidata entry found for GNIS ID {gnis_id} ({remaining_count} remaining)")
+        # No action for other cases (e.g. status "Not found" or "Error during lookup" from successful task completion)
+        # as these are logged by the logger, and we only want successful matches in local_results.
 
-    # Create and run tasks for all features.
-    # Pass current_index to process_feature for logging if needed, though processed_count is more direct for remaining.
-    tasks = [process_feature(feature, idx) for idx, feature in enumerate(features_to_check)]
-    await asyncio.gather(*tasks, return_exceptions=True) # return_exceptions=True ensures all tasks complete even if some fail.
     return local_results
 
 # Note: The generate_paginated_html_report function was previously removed.

@@ -92,9 +92,19 @@ async def find_wikidata_entry_by_gnis_id(session, gnis_id, max_retries=3):
 
 def _save_current_progress(raw_overpass_data_cache, features_to_check, results_to_save):
     """Core logic for saving current progress to resume_state.json."""
-    logging.info(f"Attempting to save current progress to {target_file}...") # target_file is defined below, this is a slight forward reference but acceptable for logging.
+    target_file = 'resume_state.json' # Define target_file at the beginning of the function
+    logging.info(f"Attempting to save current progress to {target_file}...")
 
-    target_file = 'resume_state.json'
+    # Log details of items being saved
+    if results_to_save:
+        logging.info("Items being saved:")
+        for item in results_to_save:
+            osm_id = item.get('osm_id', 'N/A')
+            gnis_id = item.get('gnis_id', 'N/A')
+            logging.info(f"  - OSM ID: {osm_id}, GNIS ID: {gnis_id}")
+    else:
+        logging.info("No results to save at this time.")
+
     temp_file = f"{target_file}.tmp" # Define temp_file based on target_file for clarity
 
     data_to_save = {

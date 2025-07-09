@@ -650,7 +650,7 @@ if __name__ == "__main__":
             user_input_timeout_str = input("Enter Overpass API timeout in seconds (e.g., 10000, press Enter for default 10000s): ").strip()
             if not user_input_timeout_str: # User pressed Enter for default.
                 effective_timeout = 10000
-                logging.info("Using default Overpass API timeout: 10000 seconds.")
+                # logging.info("Using default Overpass API timeout: 10000 seconds.") # Removed this line
             else:
                 effective_timeout = int(user_input_timeout_str)
                 if effective_timeout <= 0: # Ensure positive timeout.

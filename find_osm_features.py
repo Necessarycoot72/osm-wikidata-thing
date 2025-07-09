@@ -12,7 +12,26 @@ import sys
 import collections
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Custom Formatter for fixed-width log lines
+FIXED_WIDTH = 150 # Define desired fixed width for log lines
+
+class FixedWidthFormatter(logging.Formatter):
+    def format(self, record):
+        log_entry = super().format(record)
+        return log_entry.ljust(FIXED_WIDTH)
+
+# Setup logger with custom formatter
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+# Console handler
+ch = logging.StreamHandler()
+ch.setLevel(logging.INFO)
+formatter = FixedWidthFormatter('%(asctime)s - %(levelname)s - %(message)s')
+ch.setFormatter(formatter)
+logger.addHandler(ch)
 
 # Global variables for managing state, primarily for signal handling and resume capabilities.
 # current_features_to_check_for_resume: List of features that define the current processing scope for resume purposes.

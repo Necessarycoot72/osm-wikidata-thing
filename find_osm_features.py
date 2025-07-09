@@ -152,7 +152,6 @@ def sigint_handler(signum, frame):
 def setup_signal_handlers():
     """Registers signal handlers for graceful shutdown."""
     signal.signal(signal.SIGINT, sigint_handler)
-    logging.info("SIGINT (Ctrl+C) handler registered.")
     # Future: Register other signal handlers like SIGHUP or SIGTERM here if needed.
 
 # Note: Old Windows-specific console event handler code and related imports (PYWIN32_AVAILABLE, IS_WINDOWS, win32api, win32con)

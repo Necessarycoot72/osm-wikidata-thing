@@ -10,6 +10,8 @@ import time
 import signal
 import sys
 import collections
+import pickle
+import gzip
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -91,8 +93,8 @@ async def find_wikidata_entry_by_gnis_id(session, gnis_id, max_retries=3):
     return None
 
 def _save_current_progress(raw_overpass_data_cache, features_to_check, results_to_save):
-    """Core logic for saving current progress to resume_state.json."""
-    target_file = 'resume_state.json' # Define target_file at the beginning of the function
+    """Core logic for saving current progress to a compressed pickle file."""
+    target_file = 'resume_state.pkl.gz' # Updated filename
     logging.info(f"Attempting to save current progress to {target_file}...")
 
     # Log details of items being saved
@@ -115,9 +117,9 @@ def _save_current_progress(raw_overpass_data_cache, features_to_check, results_t
 
     # Phase 1: Write to temporary file
     try:
-        with open(temp_file, 'w', encoding='utf-8') as f:
-            json.dump(data_to_save, f) # Using compact JSON for efficiency
-    except Exception as e: # Catching a broad exception as various issues can occur during file I/O
+        with gzip.open(temp_file, 'wb') as f:
+            pickle.dump(data_to_save, f)
+    except Exception as e: # Catching a broad exception as various issues can occur during file I/O or pickling
         logging.error(f"Failed to write progress to temporary file {temp_file}: {e}")
         if os.path.exists(temp_file): # Attempt cleanup if temp file was created
             try:
@@ -225,16 +227,17 @@ async def log_results_sequentially(results_queue, total_features_to_log):
 
 
 def load_progress():
-    """Loads progress from resume_state.json if it exists."""
-    if os.path.exists('resume_state.json'):
+    """Loads progress from resume_state.pkl.gz if it exists."""
+    target_file = 'resume_state.pkl.gz'
+    if os.path.exists(target_file):
         try:
-            with open('resume_state.json', 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            with gzip.open(target_file, 'rb') as f:
+                data = pickle.load(f)
             loaded_raw_overpass = data.get('raw_overpass_data_cache', None)
             loaded_features = data.get('features_to_check', [])
             loaded_results = data.get('results', [])
 
-            log_message = f"Progress loaded from resume_state.json: {len(loaded_results)} results, {len(loaded_features)} features to potentially check."
+            log_message = f"Progress loaded from {target_file}: {len(loaded_results)} results, {len(loaded_features)} features to potentially check."
             if loaded_raw_overpass is not None:
                 log_message += " Found cached raw Overpass data."
             else:
@@ -243,21 +246,21 @@ def load_progress():
 
             # Basic validation: ensure keys exist and values are lists for features and results
             if not isinstance(loaded_features, list) or not isinstance(loaded_results, list):
-                logging.error("Invalid data format in resume_state.json for features_to_check or results. Expected lists.")
-                os.remove('resume_state.json')
-                logging.info("Corrupted or invalid resume_state.json removed.")
+                logging.error(f"Invalid data format in {target_file} for features_to_check or results. Expected lists.")
+                os.remove(target_file)
+                logging.info(f"Corrupted or invalid {target_file} removed.")
                 return None, [], []
             return loaded_raw_overpass, loaded_features, loaded_results
-        except (IOError, json.JSONDecodeError) as e: # Catch issues related to file reading or JSON parsing
-            logging.error(f"Error loading or parsing resume_state.json: {e}. The file might be corrupted or unreadable.")
+        except (IOError, pickle.UnpicklingError, EOFError, AttributeError, ImportError, IndexError) as e: # Catch common unpickling issues
+            logging.error(f"Error loading or parsing {target_file}: {e}. The file might be corrupted or unreadable.")
             try:
-                os.remove('resume_state.json') # Attempt to remove the problematic file
-                logging.info("Removed corrupted or unreadable resume_state.json.")
+                os.remove(target_file) # Attempt to remove the problematic file
+                logging.info(f"Removed corrupted or unreadable {target_file}.")
             except OSError as oe:
-                logging.error(f"Error removing corrupted resume_state.json after load failure: {oe}")
+                logging.error(f"Error removing corrupted {target_file} after load failure: {oe}")
             return None, [], []
     else:
-        logging.info("No resume_state.json found. Starting a fresh session.")
+        logging.info(f"No {target_file} found. Starting a fresh session.")
         return None, [], []
 
 async def process_features_concurrently(features_to_check, session, master_results_list, results_lock, concurrency_limit=5):

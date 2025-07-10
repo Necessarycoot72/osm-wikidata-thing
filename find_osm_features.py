@@ -12,6 +12,8 @@ import sys
 import collections
 import pickle
 import gzip
+import csv
+import io
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -32,13 +34,11 @@ class OverpassTimeoutError(Exception):
 OVERPASS_API_URL = "https://overpass-api.de/api/interpreter"
 WIKIDATA_SPARQL_URL = "https://query.wikidata.org/sparql"
 BASE_OVERPASS_QUERY = """
-[out:json][timeout:{timeout}];
+[out:csv(::type, ::id, "gnis:feature_id"; true; "\\t")][timeout:{timeout}];
 (
-  nwr["gnis:feature_id"];
+  nwr["gnis:feature_id"][!"wikidata"];
 );
-out body;
->;
-out skel qt;
+out;
 """
 SPARQL_QUERY = """
 SELECT ?item WHERE {{
@@ -47,18 +47,48 @@ SELECT ?item WHERE {{
 """
 
 def fetch_osm_features_with_gnis_id(user_timeout):
+    """
+    Fetches features from Overpass API based on BASE_OVERPASS_QUERY,
+    expecting CSV output, and transforms them into a list of dicts.
+    """
     try:
         response = requests.get(OVERPASS_API_URL, params={'data': BASE_OVERPASS_QUERY.format(timeout=user_timeout)}, timeout=user_timeout)
         response.raise_for_status()
-        data = response.json()
-        return data.get('elements', [])
+        csv_text = response.text
+
+        elements = []
+        # Use io.StringIO to treat the string as a file
+        csvfile = io.StringIO(csv_text)
+        # Assuming tab delimiter as per Overpass default for out:csv and our query structure
+        # The headers from Overpass for ::type and ::id are typically '@type' and '@id'
+        reader = csv.DictReader(csvfile, delimiter='\t')
+
+        for row in reader:
+            try:
+                # Ensure essential keys are present, otherwise skip row with a warning
+                if '@type' not in row or '@id' not in row or 'gnis:feature_id' not in row:
+                    logging.warning(f"Skipping CSV row due to missing required columns: {row}")
+                    continue
+
+                elements.append({
+                    'type': row['@type'],
+                    'id': int(row['@id']), # OSM IDs are integers
+                    'tags': {'gnis:feature_id': row['gnis:feature_id']}
+                })
+            except ValueError as ve:
+                logging.warning(f"Skipping CSV row due to invalid data (e.g., non-integer ID): {row} - Error: {ve}")
+                continue
+        return elements
     except requests.exceptions.Timeout:
         raise OverpassTimeoutError("Timeout fetching data from Overpass API.")
     except requests.exceptions.RequestException as e:
         logging.error(f"Error fetching data from Overpass API: {e}")
         return []
-    except json.JSONDecodeError:
-        logging.error("Failed to decode JSON from Overpass API response.")
+    except csv.Error as e:
+        logging.error(f"Failed to parse CSV from Overpass API response: {e}")
+        return []
+    except Exception as e: # Catch any other unexpected errors during parsing
+        logging.error(f"An unexpected error occurred while processing Overpass data: {e}")
         return []
 
 async def find_wikidata_entry_by_gnis_id(session, gnis_id, max_retries=3):
@@ -284,8 +314,9 @@ async def process_features_concurrently(features_to_check, session, master_resul
 
     async def process_feature(feature, original_index, queue_to_put_on, http_session, current_master_results_list, current_results_lock):
         # This inner function processes a single feature.
+        # `feature` is now {'type': ..., 'id': ..., 'tags': {'gnis:feature_id': ...}}
         gnis_id = feature['tags']['gnis:feature_id']
-        name = feature['tags'].get('name', 'N/A')
+        name = 'N/A' # Name is no longer available from the initial Overpass query
         osm_type = feature['type']
         osm_id = feature['id']
         wikidata_id = None
@@ -500,15 +531,16 @@ async def fetch_and_prepare_osm_data(query_timeout, processed_gnis_ids_from_load
                 if os.path.exists(temp_purged_file): os.remove(temp_purged_file)
 
 
-    # Filter features for actual processing: not having wikidata tag, having gnis:feature_id, and not already processed (from loaded results)
+    # Filter features for actual processing:
+    # - Overpass query now ensures features have 'gnis:feature_id' and do not have 'wikidata'.
+    # - We still need to filter out features whose gnis_id has already been processed (from loaded results).
     features_for_processing_this_run = [
         feature for feature in temp_features_for_further_processing # Use de-duplicated list
-        if 'wikidata' not in feature['tags']
-        and 'gnis:feature_id' in feature['tags'] # Ensure it has GNIS ID
-        and feature['tags']['gnis:feature_id'] not in processed_gnis_ids_from_loaded_results
+        # 'gnis:feature_id' is guaranteed to be in feature['tags'] by fetch_osm_features_with_gnis_id
+        if feature['tags']['gnis:feature_id'] not in processed_gnis_ids_from_loaded_results
     ]
 
-    logging.info(f"Derived {len(features_for_processing_this_run)} features to process from new Overpass data source (after purging and filtering).")
+    logging.info(f"Derived {len(features_for_processing_this_run)} features to process from new Overpass data source (after purging duplicates and filtering already processed GNIS IDs).")
     # raw_data_defining_current_scope: The full list of features from this Overpass fetch/cache choice. This is what `current_features_to_check_for_resume` will be set to.
     # effective_raw_overpass_cache: The actual raw data (list of features) that will be saved in `resume_state.json` under `raw_overpass_data_cache`.
     return features_for_processing_this_run, raw_data_defining_current_scope, effective_raw_overpass_cache

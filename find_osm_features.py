@@ -316,7 +316,7 @@ async def process_features_concurrently(features_to_check, session, master_resul
         # This inner function processes a single feature.
         # `feature` is now {'type': ..., 'id': ..., 'tags': {'gnis:feature_id': ...}}
         gnis_id = feature['tags']['gnis:feature_id']
-        name = 'N/A' # Name is no longer available from the initial Overpass query
+        # Name is no longer available or needed, so it's removed.
         osm_type = feature['type']
         osm_id = feature['id']
         wikidata_id = None
@@ -332,7 +332,7 @@ async def process_features_concurrently(features_to_check, session, master_resul
                 feature_data = {
                     'osm_type': osm_type,
                     'osm_id': osm_id,
-                    'name': name,
+                    # 'name': name, # Name field removed
                     'gnis_id': gnis_id,
                     'wikidata_id': wikidata_id
                 }
@@ -349,7 +349,7 @@ async def process_features_concurrently(features_to_check, session, master_resul
             'original_index': original_index,
             'gnis_id': gnis_id,
             'wikidata_id': wikidata_id, # Can be None if not found or error
-            'name': name,
+            # 'name': name, # Name field removed
             'osm_type': osm_type,
             'osm_id': osm_id,
             'status': status

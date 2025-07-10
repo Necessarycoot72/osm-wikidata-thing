@@ -4,8 +4,7 @@ import json
 import asyncio
 import aiohttp
 
-# Adjust the import path if your find_osm_features.py is in a different location relative to tests
-# Assuming find_osm_features.py is in the parent directory of 'tests'
+# Ensure find_osm_features.py can be imported (assuming it's in the parent directory).
 import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -64,11 +63,11 @@ class TestOsmProcessing(unittest.IsolatedAsyncioTestCase):
         mock_session = AsyncMock(spec=aiohttp.ClientSession)
         mock_response = AsyncMock(spec=aiohttp.ClientResponse)
 
-        # Setup the async context manager behavior for session.get()
+        # Mock the async context manager for session.get()
         mock_context_manager = AsyncMock()
         mock_session.get.return_value = mock_context_manager
         mock_context_manager.__aenter__.return_value = mock_response
-        mock_context_manager.__aexit__.return_value = None # Important for proper cleanup
+        mock_context_manager.__aexit__.return_value = None # Ensure proper async context cleanup
 
         return mock_session, mock_response
 
@@ -90,8 +89,8 @@ class TestOsmProcessing(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
 
     async def test_find_wikidata_aiohttp_client_error(self):
-        mock_session = AsyncMock(spec=aiohttp.ClientSession) # session itself
-        mock_session.get.side_effect = aiohttp.ClientError("Test ClientError") # .get() call raises
+        mock_session = AsyncMock(spec=aiohttp.ClientSession)
+        mock_session.get.side_effect = aiohttp.ClientError("Test ClientError") # Mock .get() to raise ClientError
         result = await find_wikidata_entry_by_gnis_id(mock_session, "test_gnis_client_err")
         self.assertIsNone(result)
 
@@ -113,8 +112,7 @@ class TestOsmProcessing(unittest.IsolatedAsyncioTestCase):
 
     async def test_find_wikidata_timeout_error(self):
         mock_session = AsyncMock(spec=aiohttp.ClientSession)
-        # Ensure the .get call returns an object that, when awaited in async with, raises TimeoutError
-        # The timeout can occur during different phases of session.get(), so this is a common way to mock it.
+        # Mock session.get() to raise asyncio.TimeoutError.
         mock_session.get.side_effect = asyncio.TimeoutError
         result = await find_wikidata_entry_by_gnis_id(mock_session, "test_gnis_timeout")
         self.assertIsNone(result)
@@ -137,7 +135,7 @@ class TestOsmProcessing(unittest.IsolatedAsyncioTestCase):
             {"id": 1, "type": "node", "tags": {"gnis:feature_id": "111", "name": "Feature 1"}},
             {"id": 2, "type": "way", "tags": {"gnis:feature_id": "222", "name": "Feature 2"}},
         ]
-        async def side_effect_func(session, gnis_id): # Make side_effect async
+        async def side_effect_func(session, gnis_id): # Async side_effect for mock
             if gnis_id == "111": return "Q111"
             if gnis_id == "222": return "Q222"
             return None
@@ -157,7 +155,7 @@ class TestOsmProcessing(unittest.IsolatedAsyncioTestCase):
             {"id": 2, "type": "node", "tags": {"gnis:feature_id": "222"}},
             {"id": 3, "type": "node", "tags": {"gnis:feature_id": "333"}},
         ]
-        async def side_effect_func(session, gnis_id): # Make side_effect async
+        async def side_effect_func(session, gnis_id): # Async side_effect for mock
             if gnis_id == "111": return "Q111"
             if gnis_id == "333": return "Q333"
             return None
@@ -177,9 +175,9 @@ class TestOsmProcessing(unittest.IsolatedAsyncioTestCase):
             {"id": 2, "type": "node", "tags": {"gnis:feature_id": "222"}},
             {"id": 3, "type": "node", "tags": {"gnis:feature_id": "333"}},
         ]
-        async def side_effect_func(session, gnis_id): # Make side_effect async
+        async def side_effect_func(session, gnis_id): # Async side_effect for mock
             if gnis_id == "111": return "Q111"
-            if gnis_id == "222": raise aiohttp.ClientError("Simulated API error")
+            if gnis_id == "222": raise aiohttp.ClientError("Simulated API error") # Simulate an error
             return None
         mock_find_wikidata.side_effect = side_effect_func
 
@@ -192,13 +190,13 @@ class TestOsmProcessing(unittest.IsolatedAsyncioTestCase):
     @patch('find_osm_features.find_wikidata_entry_by_gnis_id', new_callable=AsyncMock)
     async def test_process_concurrently_chunking(self, mock_find_wikidata):
         sample_features = [
-            {"id": i, "type": "node", "tags": {"gnis:feature_id": str(i)*3}} for i in range(1, 6)
+            {"id": i, "type": "node", "tags": {"gnis:feature_id": str(i)*3}} for i in range(1, 6) # 5 features
         ]
-        async def side_effect_func(session, gnis_id): # Make side_effect async
-            return f"Q{gnis_id}"
+        async def side_effect_func(session, gnis_id): # Async side_effect for mock
+            return f"Q{gnis_id}" # Simple mock return based on GNIS ID
         mock_find_wikidata.side_effect = side_effect_func
 
-        result = await process_features_concurrently(sample_features, concurrency_limit=2)
+        result = await process_features_concurrently(sample_features, concurrency_limit=2) # Test with concurrency < num_features
         self.assertEqual(len(result), 5)
         self.assertEqual(mock_find_wikidata.call_count, 5)
         expected_qids = {f"Q{str(i)*3}" for i in range(1,6)}

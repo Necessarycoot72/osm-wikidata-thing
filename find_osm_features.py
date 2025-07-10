@@ -4,7 +4,6 @@ import requests
 import logging
 import json
 import os
-import re
 import argparse
 import time
 import signal
@@ -475,7 +474,7 @@ async def fetch_and_prepare_osm_data(query_timeout, processed_gnis_ids_from_load
     if attempt_live_api_fetch:
         logging.info("Attempting to fetch new data from Overpass API. This may take some time")
         try:
-            fetched_data = fetch_osm_features_with_gnis_id(query_timeout)
+            # Call fetch_osm_features_with_gnis_id only once
             fetched_data_elements = fetch_osm_features_with_gnis_id(query_timeout)
             effective_raw_overpass_cache = fetched_data_elements # Update cache with newly fetched data.
             source_of_new_raw_data = fetched_data_elements
@@ -637,27 +636,29 @@ async def save_final_results_and_cleanup(final_results_list):
             logging.info(f"Saved {len(sorted_results)} total features to osm_features_to_update.json")
 
             # Successful save, now remove resume state
-            if os.path.exists("resume_state.json"):
+            resume_file_name = "resume_state.pkl.gz"
+            if os.path.exists(resume_file_name):
                 try:
-                    os.remove("resume_state.json")
-                    logging.info("Processing completed successfully. Resume state file 'resume_state.json' removed.")
+                    os.remove(resume_file_name)
+                    logging.info(f"Processing completed successfully. Resume state file '{resume_file_name}' removed.")
                 except OSError as e:
-                    logging.error(f"Error removing resume_state.json: {e}")
+                    logging.error(f"Error removing {resume_file_name}: {e}")
             else:
                 logging.info("Processing completed successfully. No resume state file to remove.")
         except IOError as e:
             logging.error(f"Error saving results to JSON: {e}")
-            # Do not proceed to delete resume_state.json if saving results failed
+            # Do not proceed to delete resume_file_name if saving results failed
             return # Exit early
     else:
         logging.info("No features with matching Wikidata entries found after processing and loading.")
         # Even if no results, if the script ran fully, clean up.
-        if os.path.exists("resume_state.json"):
+        resume_file_name = "resume_state.pkl.gz"
+        if os.path.exists(resume_file_name):
             try:
-                os.remove("resume_state.json")
-                logging.info("Processing completed (no results found). Resume state file 'resume_state.json' removed.")
+                os.remove(resume_file_name)
+                logging.info(f"Processing completed (no results found). Resume state file '{resume_file_name}' removed.")
             except OSError as e:
-                logging.error(f"Error removing resume_state.json: {e}")
+                logging.error(f"Error removing {resume_file_name}: {e}")
         else:
             logging.info("Processing completed (no results found). No resume state file to remove.")
 
@@ -708,9 +709,13 @@ async def main_async(query_timeout):
     # Exit if there's nothing to process and no results to save.
     if not features_for_processing_this_run and not current_results_for_resume:
         logging.info("No features to process in this run and no existing results to save. Exiting.")
-        if os.path.exists("resume_state.json"):
-            try: os.remove("resume_state.json"); logging.info("Cleaned up resume_state.json.")
-            except OSError as e: logging.error(f"Error removing resume_state.json: {e}")
+        resume_file_name = "resume_state.pkl.gz"
+        if os.path.exists(resume_file_name):
+            try:
+                os.remove(resume_file_name)
+                logging.info(f"Cleaned up {resume_file_name}.")
+            except OSError as e:
+                logging.error(f"Error removing {resume_file_name}: {e}")
         return
 
     # Step 3: Process Wikidata Lookups

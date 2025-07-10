@@ -553,7 +553,7 @@ async def fetch_and_prepare_osm_data(query_timeout, processed_gnis_ids_from_load
     count_purged_due_to_multiple_ids_in_tag = len(features_to_expunge_due_to_multiple_ids_in_tag_list)
 
     if features_to_expunge_due_to_multiple_ids_in_tag_list:
-        target_multi_id_file = 'gnis_ids_on_multiple_features.json'
+        target_multi_id_file = 'gnis_ids_on_multiple_features.json' # Corrected typo: multible -> multiple
         temp_multi_id_file = f"{target_multi_id_file}.tmp"
         logging.info(f"Found {count_purged_due_to_multiple_ids_in_tag} features containing multiple GNIS IDs in their tag.")
         try:

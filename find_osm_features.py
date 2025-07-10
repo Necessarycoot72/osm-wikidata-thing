@@ -438,6 +438,9 @@ async def fetch_and_prepare_osm_data(query_timeout, processed_gnis_ids_from_load
     # Use a local variable for the raw Overpass data that might be modified by user choice or fetching.
     effective_raw_overpass_cache = current_global_raw_overpass_data_state
     source_of_new_raw_data = None # This will hold the raw elements list from Overpass/cache.
+    initial_total_features = 0
+    count_purged_due_to_shared_gnis = 0
+
     attempt_live_api_fetch = True
     # This defines the full set of features for the current run, used for creating 'features_to_check' on interrupt.
     raw_data_defining_current_scope = effective_raw_overpass_cache
@@ -494,6 +497,9 @@ async def fetch_and_prepare_osm_data(query_timeout, processed_gnis_ids_from_load
         # Return empty lists for features and scope, along with the current (possibly None) cache state.
         return [], [], effective_raw_overpass_cache
 
+    initial_total_features = len(source_of_new_raw_data)
+    logging.info(f"Initial features from Overpass data source: {initial_total_features}")
+
     # Deduplication: Identify GNIS IDs used by multiple features.
     # These features will be logged and saved separately, then excluded from main processing.
     gnis_id_counts = collections.Counter()
@@ -529,20 +535,63 @@ async def fetch_and_prepare_osm_data(query_timeout, processed_gnis_ids_from_load
                 logging.error(f"Error saving purged features to {target_purged_file}: {e}")
                 # Clean up temp file if exists
                 if os.path.exists(temp_purged_file): os.remove(temp_purged_file)
+        count_purged_due_to_shared_gnis = len(purged_features_for_json)
 
+
+    # New: Identify and Expunge Features with Multiple GNIS IDs in their tag
+    features_to_expunge_due_to_multiple_ids_in_tag_list = []
+    single_gnis_id_features_list = []
+    count_purged_due_to_multiple_ids_in_tag = 0
+
+    for feature in temp_features_for_further_processing: # Iterate through features that passed the first purge
+        gnis_id_value = feature['tags']['gnis:feature_id']
+        if ';' in gnis_id_value:
+            features_to_expunge_due_to_multiple_ids_in_tag_list.append(feature)
+        else:
+            single_gnis_id_features_list.append(feature)
+
+    count_purged_due_to_multiple_ids_in_tag = len(features_to_expunge_due_to_multiple_ids_in_tag_list)
+
+    if features_to_expunge_due_to_multiple_ids_in_tag_list:
+        target_multi_id_file = 'gnis_ids_on_multiple_features.json'
+        temp_multi_id_file = f"{target_multi_id_file}.tmp"
+        logging.info(f"Found {count_purged_due_to_multiple_ids_in_tag} features containing multiple GNIS IDs in their tag.")
+        try:
+            with open(temp_multi_id_file, 'w', encoding='utf-8') as f:
+                json.dump(features_to_expunge_due_to_multiple_ids_in_tag_list, f, indent=2)
+            os.replace(temp_multi_id_file, target_multi_id_file)
+            logging.info(f"Successfully saved {count_purged_due_to_multiple_ids_in_tag} features with multiple GNIS IDs to {target_multi_id_file}.")
+        except Exception as e:
+            logging.error(f"Error saving features with multiple GNIS IDs to {target_multi_id_file}: {e}")
+            if os.path.exists(temp_multi_id_file): os.remove(temp_multi_id_file)
 
     # Filter features for actual processing:
     # - Overpass query now ensures features have 'gnis:feature_id' and do not have 'wikidata'.
     # - We still need to filter out features whose gnis_id has already been processed (from loaded results).
+    # This filtering now operates on single_gnis_id_features_list
     features_for_processing_this_run = [
-        feature for feature in temp_features_for_further_processing # Use de-duplicated list
-        # 'gnis:feature_id' is guaranteed to be in feature['tags'] by fetch_osm_features_with_gnis_id
+        feature for feature in single_gnis_id_features_list
         if feature['tags']['gnis:feature_id'] not in processed_gnis_ids_from_loaded_results
     ]
+    count_filtered_already_processed = len(single_gnis_id_features_list) - len(features_for_processing_this_run)
 
-    logging.info(f"Derived {len(features_for_processing_this_run)} features to process from new Overpass data source (after purging duplicates and filtering already processed GNIS IDs).")
+    # Enhanced Summary Logging
+    logging.info("--- Data Preparation Summary ---")
+    logging.info(f"Initial features from Overpass data source: {initial_total_features}")
+
+    percent_purged_shared_gnis = (count_purged_due_to_shared_gnis / initial_total_features * 100) if initial_total_features > 0 else 0
+    logging.info(f"Purged (shared GNIS ID across features): {count_purged_due_to_shared_gnis} ({percent_purged_shared_gnis:.2f}%)")
+
+    percent_purged_multiple_ids_in_tag = (count_purged_due_to_multiple_ids_in_tag / initial_total_features * 100) if initial_total_features > 0 else 0
+    logging.info(f"Purged (multiple GNIS IDs in tag): {count_purged_due_to_multiple_ids_in_tag} ({percent_purged_multiple_ids_in_tag:.2f}%)")
+
+    logging.info(f"Features remaining after purges: {len(single_gnis_id_features_list)}")
+    logging.info(f"Filtered (already processed based on loaded state): {count_filtered_already_processed}")
+    logging.info(f"Final features for this run: {len(features_for_processing_this_run)}")
+    logging.info("---------------------------------")
+
     # raw_data_defining_current_scope: The full list of features from this Overpass fetch/cache choice. This is what `current_features_to_check_for_resume` will be set to.
-    # effective_raw_overpass_cache: The actual raw data (list of features) that will be saved in `resume_state.json` under `raw_overpass_data_cache`.
+    # effective_raw_overpass_cache: The actual raw data (list of features) that will be saved in the resume state under `raw_overpass_data_cache`.
     return features_for_processing_this_run, raw_data_defining_current_scope, effective_raw_overpass_cache
 
 

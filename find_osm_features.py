@@ -1,4 +1,3 @@
-import asyncio
 import requests
 import logging
 import json
@@ -125,7 +124,7 @@ def find_wikidata_entries_by_gnis_ids_batch(gnis_ids, max_retries=3):
 
 
 
-async def process_features_concurrently(features_to_check, master_results_list, batch_size):
+def process_features_concurrently(features_to_check, master_results_list, batch_size):
     """
     Processes features in batches to find Wikidata entries.
     Updates master_results_list in place.
@@ -164,7 +163,7 @@ async def process_features_concurrently(features_to_check, master_results_list, 
     return len(master_results_list) - initial_master_results_len
 
 
-async def fetch_and_prepare_osm_data(query_timeout):
+def fetch_and_prepare_osm_data(query_timeout):
     """Fetches OSM data, handles deduplication, and filters features."""
     logging.info("Attempting to fetch new data from Overpass API. This may take some time...")
     try:
@@ -259,7 +258,7 @@ async def fetch_and_prepare_osm_data(query_timeout):
     )
 
 
-async def process_wikidata_lookups(features_to_process_list, master_results_list, batch_size):
+def process_wikidata_lookups(features_to_process_list, master_results_list, batch_size):
     """Processes features for Wikidata entries; `master_results_list` is updated in-place."""
     if not features_to_process_list:
         logging.info("No features provided for Wikidata lookup in this batch.")
@@ -267,7 +266,7 @@ async def process_wikidata_lookups(features_to_process_list, master_results_list
 
     # Since we are batching, the async processing is simpler.
     # The `process_features_concurrently` function will be refactored to handle batches.
-    count_newly_added = await process_features_concurrently(
+    count_newly_added = process_features_concurrently(
         features_to_process_list,
         master_results_list, # Passed by reference, updated in place.
         batch_size,
@@ -279,7 +278,7 @@ async def process_wikidata_lookups(features_to_process_list, master_results_list
         logging.info("Wikidata lookup phase completed for this batch, no new results added.")
     return master_results_list
 
-async def save_final_results_and_cleanup(final_results_list, purged_shared, purged_multi_id):
+def save_final_results_and_cleanup(final_results_list, purged_shared, purged_multi_id):
     """Saves final results and purged features to JSON files."""
     if final_results_list:
         try:
@@ -310,7 +309,7 @@ async def save_final_results_and_cleanup(final_results_list, purged_shared, purg
             logging.error(f"Error saving purged (multiple GNIS IDs) features: {e}")
 
 
-async def main_async(query_timeout, batch_size):
+def main_async(query_timeout, batch_size):
     """Main asynchronous function for the OSM feature processing workflow."""
     logging.info("Starting main asynchronous execution.")
 
@@ -318,7 +317,7 @@ async def main_async(query_timeout, batch_size):
         features_for_processing_this_run,
         purged_shared,
         purged_multi_id,
-    ) = await fetch_and_prepare_osm_data(query_timeout)
+    ) = fetch_and_prepare_osm_data(query_timeout)
 
     # Early exit if no features to process.
     if not features_for_processing_this_run:
@@ -326,14 +325,14 @@ async def main_async(query_timeout, batch_size):
         return
 
     # Process Wikidata Lookups.
-    results = await process_wikidata_lookups(
+    results = process_wikidata_lookups(
         features_for_processing_this_run,
         [], # Start with an empty list of results.
         batch_size,
     )
 
     # Save final results.
-    await save_final_results_and_cleanup(results, purged_shared, purged_multi_id)
+    save_final_results_and_cleanup(results, purged_shared, purged_multi_id)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Fetch OSM features with GNIS IDs and find corresponding Wikidata entries.")
@@ -406,7 +405,7 @@ if __name__ == "__main__":
     logging.info(f"Wikidata query batch size for this session: {effective_batch_size}.")
 
     start_time = time.time()
-    asyncio.run(main_async(effective_timeout, effective_batch_size)) # Run the main async workflow.
+    main_async(effective_timeout, effective_batch_size) # Run the main async workflow.
     end_time = time.time()
     logging.info(f"Total execution time: {end_time - start_time:.2f}s.")
     logging.info("Processing complete. It is safe to exit the terminal.")

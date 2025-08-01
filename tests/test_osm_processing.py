@@ -75,7 +75,7 @@ class TestOsmProcessing(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, {})
 
     @patch('find_osm_features.find_wikidata_entries_by_gnis_ids_batch')
-    async def test_process_features_batching(self, mock_batch_find):
+    def test_process_features_batching(self, mock_batch_find):
         sample_features = [
             {"type": "node", "id": 1, "tags": {"gnis:feature_id": "111"}},
             {"type": "node", "id": 2, "tags": {"gnis:feature_id": "222"}},
@@ -89,7 +89,7 @@ class TestOsmProcessing(unittest.IsolatedAsyncioTestCase):
         }
 
         master_results_list = []
-        added_count = await process_features_concurrently(sample_features, master_results_list, 100)
+        added_count = process_features_concurrently(sample_features, master_results_list, 100)
 
         self.assertEqual(added_count, 2)
         expected_results = [

@@ -1,5 +1,4 @@
 import asyncio
-import aiohttp
 import requests
 import logging
 import json
@@ -29,8 +28,9 @@ BASE_OVERPASS_QUERY = """
 out;
 """
 SPARQL_QUERY = """
-SELECT ?item WHERE {{
-  ?item wdt:P590 "{gnis_id}" .
+SELECT ?item ?gnis_id WHERE {{
+  VALUES ?gnis_id {{ {gnis_ids} }}
+  ?item wdt:P590 ?gnis_id .
 }}
 """
 
@@ -68,7 +68,7 @@ def fetch_osm_features_with_gnis_id(user_timeout):
         raise OverpassTimeoutError("Timeout fetching data from Overpass API.")
     except requests.exceptions.RequestException as e:
         logging.error(f"Error fetching data from Overpass API: {e}")
-        return []
+        sys.exit(1)
     except csv.Error as e:
         logging.error(f"Failed to parse CSV from Overpass API response: {e}")
         return []
@@ -76,180 +76,93 @@ def fetch_osm_features_with_gnis_id(user_timeout):
         logging.error(f"An unexpected error occurred while processing Overpass data: {e}")
         return []
 
-async def find_wikidata_entry_by_gnis_id(session, gnis_id, max_retries=3):
+
+def find_wikidata_entries_by_gnis_ids_batch(gnis_ids, max_retries=3):
+    """
+    Finds Wikidata entries for a batch of GNIS IDs using a single SPARQL query.
+    Returns a dictionary mapping GNIS IDs to Wikidata QIDs.
+    """
+    if not gnis_ids:
+        return {}
+
+    # The VALUES clause in SPARQL requires space-separated strings in quotes.
+    gnis_id_string = " ".join(f'"{gnis_id}"' for gnis_id in gnis_ids)
+    query = SPARQL_QUERY.format(gnis_ids=gnis_id_string)
+
+    headers = {
+        'User-Agent': 'OSM-Wikidata-Updater/1.0 (your.email@example.com; find_osm_features.py)',
+        'Accept': 'application/json'
+    }
+
     for attempt in range(max_retries):
         try:
-            async with session.get(WIKIDATA_SPARQL_URL, params={'query': SPARQL_QUERY.format(gnis_id=gnis_id), 'format': 'json'}) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    if data.get('results', {}).get('bindings'):
-                        return data['results']['bindings'][0]['item']['value'].split('/')[-1]
-                elif response.status == 429:
-                    retry_after = response.headers.get('Retry-After')
-                    if retry_after:
-                        wait_time = int(retry_after)
-                        logging.warning(f"Rate limited for GNIS ID {gnis_id}, retrying after {wait_time} seconds...")
-                        await asyncio.sleep(wait_time)
-                    else:
-                        logging.error(f"Rate limited for GNIS ID {gnis_id}, but no Retry-After header provided.")
-                        break
-                else:
-                    logging.error(f"Error fetching Wikidata entry for GNIS ID {gnis_id}: HTTP {response.status}")
-                    break
-        except aiohttp.ClientError as e:
-            logging.error(f"aiohttp error for GNIS ID {gnis_id}: {e}")
-            break
-        except asyncio.TimeoutError:
-            logging.error(f"Timeout error for GNIS ID {gnis_id}")
-            break
-        except json.JSONDecodeError:
-            logging.error(f"JSON decode error for GNIS ID {gnis_id}")
-            break
-    return None
+            response = requests.post(WIKIDATA_SPARQL_URL, data={'query': query}, headers=headers)
+            if response.status_code == 200:
+                data = response.json()
+                results = {}
+                for binding in data.get('results', {}).get('bindings', []):
+                    gnis_id = binding.get('gnis_id', {}).get('value')
+                    item_qid = binding.get('item', {}).get('value', '').split('/')[-1]
+                    if gnis_id and item_qid:
+                        results[gnis_id] = item_qid
+                return results
+            elif response.status_code == 429: # Rate limited
+                retry_after = int(response.headers.get('Retry-After', '60'))
+                logging.warning(f"Rate limited. Retrying after {retry_after} seconds...")
+                time.sleep(retry_after)
+            else:
+                logging.error(f"Error fetching Wikidata entries: HTTP {response.status_code} - {response.text}")
+                break # Don't retry on non-rate-limit errors
+        except requests.RequestException as e:
+            logging.error(f"Request error fetching Wikidata entries: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(5) # Wait before retrying
+        except json.JSONDecodeError as e:
+            logging.error(f"JSON decode error when fetching Wikidata entries: {e} - Response: {response.text}")
+            break # Don't retry on decode error
 
-# Sentinel value for terminating the logging queue.
-LOGGING_SENTINEL = object()
-
-async def log_results_sequentially(results_queue, total_features_to_log):
-    """Consumes results from a queue, buffers, and logs them in sequential order."""
-    buffered_results = {}
-    next_expected_log_index = 0
-    logged_items_count = 0
-
-    # Process items until all expected logs are done or termination.
-    while logged_items_count < total_features_to_log:
-        try:
-            result = await results_queue.get() # Wait for an item.
-        except asyncio.CancelledError:
-            logging.info("Logging task cancelled, attempting to flush buffer.")
-            break # Exit to flush buffer.
-
-        if result is LOGGING_SENTINEL:
-            results_queue.task_done() # Acknowledge sentinel.
-            break # Producers are done; exit to flush buffer.
-
-        if result: # Should be a dict unless a different sentinel is used.
-            buffered_results[result['original_index']] = result
-
-        results_queue.task_done() # Mark queue item as processed (buffered).
-
-        # Log contiguous items from buffer.
-        while next_expected_log_index in buffered_results:
-            item_to_log = buffered_results.pop(next_expected_log_index)
-
-            log_line = f"Item {item_to_log['original_index'] + 1}/{total_features_to_log}: {item_to_log['status']} Wikidata for GNIS ID {item_to_log['gnis_id']}"
-            if item_to_log['wikidata_id'] and item_to_log['status'] == "Found":
-                log_line += f": {item_to_log['wikidata_id']}"
-
-            logging.info(log_line)
-            next_expected_log_index += 1
-            logged_items_count +=1
-
-    # Flush any remaining out-of-order items after loop termination.
-    if buffered_results:
-        logging.debug(f"Flushing {len(buffered_results)} remaining buffered items from logging queue...")
-        for index in sorted(buffered_results.keys()): # Process sorted by original index.
-            if index >= next_expected_log_index: # Ensure no re-logging.
-                item_to_log = buffered_results.pop(index)
-                log_line = f"Item {item_to_log['original_index'] + 1}/{total_features_to_log}: {item_to_log['status']} Wikidata for GNIS ID {item_to_log['gnis_id']}"
-                if item_to_log['wikidata_id'] and item_to_log['status'] == "Found":
-                    log_line += f": {item_to_log['wikidata_id']}"
-                logging.info(log_line)
-                logged_items_count +=1
-
-    # Final status.
-    if logged_items_count < total_features_to_log and total_features_to_log > 0:
-         logging.warning(f"Logging task finished, but only {logged_items_count}/{total_features_to_log} items were logged.")
-    elif total_features_to_log == 0:
-        logging.info("Logging task initiated for zero features; nothing to log.")
-    else:
-        logging.info(f"Logging task completed. All {logged_items_count}/{total_features_to_log} items logged.")
+    return {}
 
 
-async def process_features_concurrently(features_to_check, session, master_results_list, results_lock, concurrency_limit=5):
-    """Concurrently processes features, logs sequentially, updates master_results_list."""
+
+async def process_features_concurrently(features_to_check, master_results_list):
+    """
+    Processes features in batches to find Wikidata entries.
+    Updates master_results_list in place.
+    """
     if not features_to_check:
         logging.info("No features for Wikidata lookup in this batch.")
         return 0
 
-    results_queue = asyncio.Queue()
-    total_features = len(features_to_check)
-
-    logging_task = asyncio.create_task(
-        log_results_sequentially(results_queue, total_features)
-    )
-
-    semaphore = asyncio.Semaphore(concurrency_limit)
     initial_master_results_len = len(master_results_list)
+    batch_size = 100
 
-    async def process_feature(feature, original_index, queue_to_put_on, http_session, current_master_results_list, current_results_lock):
-        gnis_id = feature['tags']['gnis:feature_id']
-        osm_type = feature['type']
-        osm_id = feature['id']
-        wikidata_id = None
-        status = "Not found"
+    for i in range(0, len(features_to_check), batch_size):
+        batch = features_to_check[i:i + batch_size]
+        gnis_ids_in_batch = [feature['tags']['gnis:feature_id'] for feature in batch]
 
-        try:
-            async with semaphore: # Limit concurrent API calls.
-                wikidata_id = await find_wikidata_entry_by_gnis_id(http_session, gnis_id)
+        logging.info(f"Processing batch {i//batch_size + 1}/{-(-len(features_to_check)//batch_size)}: {len(batch)} features.")
+
+        # This is a synchronous, blocking call.
+        wikidata_results_map = find_wikidata_entries_by_gnis_ids_batch(gnis_ids_in_batch)
+
+        for feature in batch:
+            gnis_id = feature['tags']['gnis:feature_id']
+            wikidata_id = wikidata_results_map.get(gnis_id)
+            status = "Found" if wikidata_id else "Not found"
+
+            # Log the result for each feature.
+            logging.info(f"GNIS ID: {gnis_id}, Status: {status}" + (f", Wikidata ID: {wikidata_id}" if wikidata_id else ""))
 
             if wikidata_id:
-                status = "Found"
-                feature_data = { # Data for saving.
-                    'osm_type': osm_type,
-                    'osm_id': osm_id,
+                master_results_list.append({
+                    'osm_type': feature['type'],
+                    'osm_id': feature['id'],
                     'gnis_id': gnis_id,
                     'wikidata_id': wikidata_id
-                }
-                async with results_lock: # Safely append to shared list.
-                    master_results_list.append(feature_data)
+                })
 
-        except Exception as e:
-            logging.error(f"Exception during Wikidata lookup for GNIS ID {gnis_id} (idx: {original_index}): {e}", exc_info=False)
-            status = f"Error during lookup: {type(e).__name__}"
-
-        # Data for logging queue.
-        result_dict_for_logging = {
-            'original_index': original_index,
-            'gnis_id': gnis_id,
-            'wikidata_id': wikidata_id,
-            'osm_type': osm_type,
-            'osm_id': osm_id,
-            'status': status
-        }
-
-        await queue_to_put_on.put(result_dict_for_logging)
-        # Returned dict is not strictly needed by caller if master_results_list is primary output.
-        return result_dict_for_logging
-
-    # Create and gather processing tasks.
-    feature_processing_tasks = [
-        process_feature(feature, idx, results_queue, session, master_results_list, results_lock)
-        for idx, feature in enumerate(features_to_check)
-    ]
-
-    gathered_logging_dicts = await asyncio.gather(*feature_processing_tasks, return_exceptions=True)
-
-    await results_queue.put(LOGGING_SENTINEL) # Signal logging task completion.
-
-    try:
-        await logging_task # Ensure logs are flushed.
-    except asyncio.CancelledError:
-        logging.info("Logging task was cancelled during shutdown of process_features_concurrently.")
-
-    final_master_results_len = len(master_results_list)
-    newly_added_count = final_master_results_len - initial_master_results_len
-
-    # Log details for tasks that failed with an unhandled exception.
-    for i, item_output in enumerate(gathered_logging_dicts):
-        if isinstance(item_output, Exception):
-            original_feature = features_to_check[i]
-            gnis_id_for_error = original_feature.get('tags', {}).get('gnis:feature_id', f'Unknown_at_idx_{i}')
-            logging.error(f"Task for GNIS ID {gnis_id_for_error} (original index {i}) failed: {item_output}", exc_info=False)
-            # Note: process_feature itself catches and logs lookup errors.
-            # This handles unexpected crashes within process_feature's structure.
-
-    return newly_added_count
+    return len(master_results_list) - initial_master_results_len
 
 
 async def fetch_and_prepare_osm_data(query_timeout):
@@ -353,25 +266,18 @@ async def process_wikidata_lookups(features_to_process_list, master_results_list
         logging.info("No features provided for Wikidata lookup in this batch.")
         return master_results_list # Return the list as is.
 
-    results_lock = asyncio.Lock() # Lock for safe concurrent appends to master_results_list.
-    headers = {'User-Agent': 'OSM-Wikidata-Updater/1.0 (your.email@example.com; find_osm_features.py)'}
+    # Since we are batching, the async processing is simpler.
+    # The `process_features_concurrently` function will be refactored to handle batches.
+    count_newly_added = await process_features_concurrently(
+        features_to_process_list,
+        master_results_list, # Passed by reference, updated in place.
+    )
 
-    async with aiohttp.ClientSession(headers=headers) as session:
-        # process_features_concurrently updates master_results_list directly
-        # and returns the count of newly added items.
-        count_newly_added = await process_features_concurrently(
-            features_to_process_list,
-            session,
-            master_results_list, # Passed by reference, updated in place.
-            results_lock,
-            concurrency_limit=5 # Configurable concurrency.
-        )
-
-        if count_newly_added > 0:
-            logging.info(f"Wikidata lookup phase added {count_newly_added} new results to the main list.")
-        else:
-            logging.info("Wikidata lookup phase completed for this batch, no new results added.")
-    return master_results_list # Return the (potentially modified) list.
+    if count_newly_added > 0:
+        logging.info(f"Wikidata lookup phase added {count_newly_added} new results to the main list.")
+    else:
+        logging.info("Wikidata lookup phase completed for this batch, no new results added.")
+    return master_results_list
 
 async def save_final_results_and_cleanup(final_results_list, purged_shared, purged_multi_id):
     """Saves final results and purged features to JSON files."""

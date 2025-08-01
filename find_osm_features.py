@@ -135,7 +135,7 @@ async def process_features_concurrently(features_to_check, master_results_list):
         return 0
 
     initial_master_results_len = len(master_results_list)
-    batch_size = 100
+    batch_size = 500
 
     for i in range(0, len(features_to_check), batch_size):
         batch = features_to_check[i:i + batch_size]

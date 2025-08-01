@@ -89,7 +89,7 @@ class TestOsmProcessing(unittest.IsolatedAsyncioTestCase):
         }
 
         master_results_list = []
-        added_count = await process_features_concurrently(sample_features, master_results_list)
+        added_count = await process_features_concurrently(sample_features, master_results_list, 100)
 
         self.assertEqual(added_count, 2)
         expected_results = [

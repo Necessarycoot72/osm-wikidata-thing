@@ -125,7 +125,7 @@ def find_wikidata_entries_by_gnis_ids_batch(gnis_ids, max_retries=3):
 
 
 
-async def process_features_concurrently(features_to_check, master_results_list):
+async def process_features_concurrently(features_to_check, master_results_list, batch_size):
     """
     Processes features in batches to find Wikidata entries.
     Updates master_results_list in place.
@@ -135,7 +135,6 @@ async def process_features_concurrently(features_to_check, master_results_list):
         return 0
 
     initial_master_results_len = len(master_results_list)
-    batch_size = 5000
 
     for i in range(0, len(features_to_check), batch_size):
         batch = features_to_check[i:i + batch_size]
@@ -260,7 +259,7 @@ async def fetch_and_prepare_osm_data(query_timeout):
     )
 
 
-async def process_wikidata_lookups(features_to_process_list, master_results_list):
+async def process_wikidata_lookups(features_to_process_list, master_results_list, batch_size):
     """Processes features for Wikidata entries; `master_results_list` is updated in-place."""
     if not features_to_process_list:
         logging.info("No features provided for Wikidata lookup in this batch.")
@@ -271,6 +270,7 @@ async def process_wikidata_lookups(features_to_process_list, master_results_list
     count_newly_added = await process_features_concurrently(
         features_to_process_list,
         master_results_list, # Passed by reference, updated in place.
+        batch_size,
     )
 
     if count_newly_added > 0:
@@ -310,7 +310,7 @@ async def save_final_results_and_cleanup(final_results_list, purged_shared, purg
             logging.error(f"Error saving purged (multiple GNIS IDs) features: {e}")
 
 
-async def main_async(query_timeout):
+async def main_async(query_timeout, batch_size):
     """Main asynchronous function for the OSM feature processing workflow."""
     logging.info("Starting main asynchronous execution.")
 
@@ -328,7 +328,8 @@ async def main_async(query_timeout):
     # Process Wikidata Lookups.
     results = await process_wikidata_lookups(
         features_for_processing_this_run,
-        [] # Start with an empty list of results.
+        [], # Start with an empty list of results.
+        batch_size,
     )
 
     # Save final results.
@@ -341,6 +342,12 @@ if __name__ == "__main__":
         type=int,
         default=None, # Handled by prompt or default value if not given.
         help="Timeout in seconds for Overpass API query. Prompts if not set."
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Number of GNIS IDs to batch in a single Wikidata query."
     )
     args = parser.parse_args()
 
@@ -371,8 +378,35 @@ if __name__ == "__main__":
 
     logging.info(f"Overpass API timeout for this session: {effective_timeout}s.")
 
+    effective_batch_size = args.batch_size
+    DEFAULT_BATCH_SIZE = 500
+
+    if effective_batch_size is None:
+        try:
+            user_input_batch_size_str = input(f"Enter Wikidata query batch size (e.g., {DEFAULT_BATCH_SIZE}, Enter for default {DEFAULT_BATCH_SIZE}): ").strip()
+            if not user_input_batch_size_str:
+                effective_batch_size = DEFAULT_BATCH_SIZE
+            else:
+                effective_batch_size = int(user_input_batch_size_str)
+                if effective_batch_size <= 0:
+                    logging.warning(f"Batch size must be positive. Using default {DEFAULT_BATCH_SIZE}.")
+                    effective_batch_size = DEFAULT_BATCH_SIZE
+                else:
+                    logging.info(f"User-defined batch size: {effective_batch_size}.")
+        except ValueError:
+            logging.warning(f"Invalid batch size input. Using default {DEFAULT_BATCH_SIZE}.")
+            effective_batch_size = DEFAULT_BATCH_SIZE
+    else:
+        if effective_batch_size <= 0:
+            logging.warning(f"CLI batch size --batch-size {args.batch_size} not positive. Using default {DEFAULT_BATCH_SIZE}.")
+            effective_batch_size = DEFAULT_BATCH_SIZE
+        else:
+            logging.info(f"Using batch size from CLI: {effective_batch_size}.")
+
+    logging.info(f"Wikidata query batch size for this session: {effective_batch_size}.")
+
     start_time = time.time()
-    asyncio.run(main_async(effective_timeout)) # Run the main async workflow.
+    asyncio.run(main_async(effective_timeout, effective_batch_size)) # Run the main async workflow.
     end_time = time.time()
     logging.info(f"Total execution time: {end_time - start_time:.2f}s.")
     logging.info("Processing complete. It is safe to exit the terminal.")

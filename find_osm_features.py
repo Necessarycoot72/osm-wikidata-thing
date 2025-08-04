@@ -34,6 +34,24 @@ SELECT ?item WHERE {{
 }}
 """
 
+
+def save_data_atomically(data, filename, log_context):
+    """Saves data to a file atomically by writing to a temp file and then replacing."""
+    if not data:
+        return
+
+    temp_file = f"{filename}.tmp"
+    try:
+        with open(temp_file, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+        os.replace(temp_file, filename)
+        logging.info(f"Saved {len(data)} {log_context} to {filename}.")
+    except Exception as e:
+        logging.error(f"Error saving {log_context} to {filename}: {e}")
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+
+
 def fetch_osm_features_with_gnis_id(user_timeout):
     """
     Fetches features from Overpass API based on BASE_OVERPASS_QUERY,
@@ -291,17 +309,11 @@ async def fetch_and_prepare_osm_data(query_timeout):
     if gnis_ids_to_purge_shared:
         logging.info(f"Identified {len(gnis_ids_to_purge_shared)} GNIS IDs used by multiple OSM features. "
                      f"{count_purged_due_to_shared_gnis} OSM features will be purged.")
-        if purged_features_shared_gnis_json:
-            target_purged_file = 'purged_duplicate_gnis_features.json'
-            temp_purged_file = f"{target_purged_file}.tmp"
-            try:
-                with open(temp_purged_file, 'w', encoding='utf-8') as f:
-                    json.dump(purged_features_shared_gnis_json, f, indent=2)
-                os.replace(temp_purged_file, target_purged_file)
-                logging.info(f"Saved {len(purged_features_shared_gnis_json)} purged features (shared GNIS) to {target_purged_file}.")
-            except Exception as e:
-                logging.error(f"Error saving purged (shared GNIS) features to {target_purged_file}: {e}")
-                if os.path.exists(temp_purged_file): os.remove(temp_purged_file)
+        save_data_atomically(
+            purged_features_shared_gnis_json,
+            'purged_duplicate_gnis_features.json',
+            "purged features (shared GNIS)"
+        )
 
     # Deduplication Stage 2: Purge features whose 'gnis:feature_id' tag contains multiple IDs.
     features_with_multiple_ids_in_tag_list = []
@@ -317,16 +329,11 @@ async def fetch_and_prepare_osm_data(query_timeout):
     count_purged_due_to_multiple_ids_in_tag = len(features_with_multiple_ids_in_tag_list)
     if features_with_multiple_ids_in_tag_list:
         logging.info(f"Found {count_purged_due_to_multiple_ids_in_tag} features containing multiple GNIS IDs in their tag value; these will be purged.")
-        target_multi_id_file = 'gnis_ids_on_multiple_features.json'
-        temp_multi_id_file = f"{target_multi_id_file}.tmp"
-        try:
-            with open(temp_multi_id_file, 'w', encoding='utf-8') as f:
-                json.dump(features_with_multiple_ids_in_tag_list, f, indent=2)
-            os.replace(temp_multi_id_file, target_multi_id_file)
-            logging.info(f"Saved {count_purged_due_to_multiple_ids_in_tag} features with multiple GNIS IDs in tag to {target_multi_id_file}.")
-        except Exception as e:
-            logging.error(f"Error saving features with multiple GNIS IDs in tag to {target_multi_id_file}: {e}")
-            if os.path.exists(temp_multi_id_file): os.remove(temp_multi_id_file)
+        save_data_atomically(
+            features_with_multiple_ids_in_tag_list,
+            'gnis_ids_on_multiple_features.json',
+            "features with multiple GNIS IDs in tag"
+        )
 
     features_for_processing_this_run = single_gnis_id_features_list
 
@@ -387,21 +394,20 @@ async def save_final_results_and_cleanup(final_results_list, purged_shared, purg
     else: # No results to save.
         logging.info("No features with matching Wikidata entries found after processing.")
 
-    if purged_shared:
-        try:
-            with open('purged_duplicate_gnis_features.json', 'w', encoding='utf-8') as f:
-                json.dump(purged_shared, f, indent=2)
-            logging.info(f"Saved {len(purged_shared)} purged features (shared GNIS) to purged_duplicate_gnis_features.json")
-        except IOError as e:
-            logging.error(f"Error saving purged (shared GNIS) features: {e}")
+    # Consolidate saving of purged feature files.
+    purged_data_to_save = [
+        (purged_shared, 'purged_duplicate_gnis_features.json', 'purged features (shared GNIS)'),
+        (purged_multi_id, 'gnis_ids_on_multiple_features.json', 'purged features (multiple GNIS IDs)')
+    ]
 
-    if purged_multi_id:
-        try:
-            with open('gnis_ids_on_multiple_features.json', 'w', encoding='utf-8') as f:
-                json.dump(purged_multi_id, f, indent=2)
-            logging.info(f"Saved {len(purged_multi_id)} purged features (multiple GNIS IDs) to gnis_ids_on_multiple_features.json")
-        except IOError as e:
-            logging.error(f"Error saving purged (multiple GNIS IDs) features: {e}")
+    for data, filename, context in purged_data_to_save:
+        if data:
+            try:
+                with open(filename, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2)
+                logging.info(f"Saved {len(data)} {context} to {filename}")
+            except IOError as e:
+                logging.error(f"Error saving {context} to {filename}: {e}")
 
 
 async def main_async(query_timeout):

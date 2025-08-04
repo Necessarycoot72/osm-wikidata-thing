@@ -22,41 +22,37 @@ class TestOsmProcessing(unittest.IsolatedAsyncioTestCase):
 
     @patch('find_osm_features.requests.get')
     def test_fetch_osm_success(self, mock_get):
+        # This test needs to be updated to reflect the new CSV-based parsing
         mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_osm_data = {
-            "elements": [
-                {"type": "node", "id": 1, "tags": {"gnis:feature_id": "123", "name": "Test Node 1"}},
-                {"type": "way", "id": 2, "tags": {"gnis:feature_id": "456", "name": "Test Way 1"}},
-            ]
-        }
-        mock_response.json.return_value = mock_osm_data
+        mock_response.raise_for_status.return_value = None
+        # Overpass CSV format: @type, @id, gnis:feature_id
+        mock_response.text = "@type\t@id\tgnis:feature_id\nnode\t1\t123\nway\t2\t456"
         mock_get.return_value = mock_response
+
         expected_output = [
-            {'id': 1, 'type': 'node', 'tags': {'gnis:feature_id': '123', 'name': 'Test Node 1'}},
-            {'id': 2, 'type': 'way', 'tags': {'gnis:feature_id': '456', 'name': 'Test Way 1'}},
+            {'type': 'node', 'id': 1, 'tags': {'gnis:feature_id': '123'}},
+            {'type': 'way', 'id': 2, 'tags': {'gnis:feature_id': '456'}},
         ]
-        result = fetch_osm_features_with_gnis_id()
+
+        result = fetch_osm_features_with_gnis_id(user_timeout=10) # Pass timeout
         self.assertEqual(result, expected_output)
-        mock_get.assert_called_once_with(
-            OVERPASS_API_URL,
-            params={'data': unittest.mock.ANY},
-            headers=unittest.mock.ANY
-        )
+        mock_get.assert_called_once()
+
 
     @patch('find_osm_features.requests.get')
     def test_fetch_osm_request_exception(self, mock_get):
         mock_get.side_effect = RequestException("Test network error")
-        result = fetch_osm_features_with_gnis_id()
+        result = fetch_osm_features_with_gnis_id(user_timeout=10) # Pass timeout
         self.assertEqual(result, [])
 
     @patch('find_osm_features.requests.get')
     def test_fetch_osm_json_decode_error(self, mock_get):
+        # This test is now about CSV parsing errors, not JSON.
         mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.side_effect = json.JSONDecodeError("Error decoding JSON", "doc", 0)
+        mock_response.raise_for_status.return_value = None
+        mock_response.text = "invalid,csv\n" # Malformed CSV
         mock_get.return_value = mock_response
-        result = fetch_osm_features_with_gnis_id()
+        result = fetch_osm_features_with_gnis_id(user_timeout=10) # Pass timeout
         self.assertEqual(result, [])
 
     async def helper_setup_mock_session_response(self):
@@ -126,81 +122,109 @@ class TestOsmProcessing(unittest.IsolatedAsyncioTestCase):
 
     # --- Tests for asynchronous process_features_concurrently ---
     async def test_process_concurrently_empty_input(self):
-        result = await process_features_concurrently([])
-        self.assertEqual(result, [])
+        # Setup mocks
+        mock_session = AsyncMock(spec=aiohttp.ClientSession)
+        master_results_list = []
+        mock_lock = AsyncMock(spec=asyncio.Lock)
+
+        count = await process_features_concurrently([], mock_session, master_results_list, mock_lock)
+        self.assertEqual(count, 0)
+        self.assertEqual(master_results_list, [])
+
 
     @patch('find_osm_features.find_wikidata_entry_by_gnis_id', new_callable=AsyncMock)
     async def test_process_concurrently_success_all_match(self, mock_find_wikidata):
+        # Setup mocks and inputs
+        mock_session = AsyncMock(spec=aiohttp.ClientSession)
+        master_results_list = []
+        mock_lock = AsyncMock(spec=asyncio.Lock)
         sample_features = [
-            {"id": 1, "type": "node", "tags": {"gnis:feature_id": "111", "name": "Feature 1"}},
-            {"id": 2, "type": "way", "tags": {"gnis:feature_id": "222", "name": "Feature 2"}},
+            {"type": "node", "id": 1, "tags": {"gnis:feature_id": "111"}},
+            {"type": "way", "id": 2, "tags": {"gnis:feature_id": "222"}},
         ]
-        async def side_effect_func(session, gnis_id): # Async side_effect for mock
-            if gnis_id == "111": return "Q111"
-            if gnis_id == "222": return "Q222"
-            return None
+        async def side_effect_func(session, gnis_id):
+            return f"Q{gnis_id}"
         mock_find_wikidata.side_effect = side_effect_func
 
-        result = await process_features_concurrently(sample_features, concurrency_limit=2)
+        # Execute
+        count = await process_features_concurrently(sample_features, mock_session, master_results_list, mock_lock, concurrency_limit=2)
+
+        # Assert
+        self.assertEqual(count, 2)
         expected = [
-            {'osm_id': 1, 'osm_type': 'node', 'tags': {'gnis:feature_id': '111', 'name': 'Feature 1'}, 'matched_wikidata_qid': 'Q111'},
-            {'osm_id': 2, 'osm_type': 'way', 'tags': {'gnis:feature_id': '222', 'name': 'Feature 2'}, 'matched_wikidata_qid': 'Q222'},
+            {'osm_type': 'node', 'osm_id': 1, 'gnis_id': '111', 'wikidata_id': 'Q111'},
+            {'osm_type': 'way', 'osm_id': 2, 'gnis_id': '222', 'wikidata_id': 'Q222'},
         ]
-        self.assertCountEqual(result, expected)
+        self.assertCountEqual(master_results_list, expected)
+
 
     @patch('find_osm_features.find_wikidata_entry_by_gnis_id', new_callable=AsyncMock)
     async def test_process_concurrently_some_match_some_none(self, mock_find_wikidata):
+        mock_session = AsyncMock(spec=aiohttp.ClientSession)
+        master_results_list = []
+        mock_lock = AsyncMock(spec=asyncio.Lock)
         sample_features = [
-            {"id": 1, "type": "node", "tags": {"gnis:feature_id": "111"}},
-            {"id": 2, "type": "node", "tags": {"gnis:feature_id": "222"}},
-            {"id": 3, "type": "node", "tags": {"gnis:feature_id": "333"}},
+            {"type": "node", "id": 1, "tags": {"gnis:feature_id": "111"}},
+            {"type": "node", "id": 2, "tags": {"gnis:feature_id": "222"}}, # No match
+            {"type": "node", "id": 3, "tags": {"gnis:feature_id": "333"}},
         ]
-        async def side_effect_func(session, gnis_id): # Async side_effect for mock
-            if gnis_id == "111": return "Q111"
-            if gnis_id == "333": return "Q333"
+        async def side_effect_func(session, gnis_id):
+            if gnis_id in ["111", "333"]: return f"Q{gnis_id}"
             return None
         mock_find_wikidata.side_effect = side_effect_func
 
-        result = await process_features_concurrently(sample_features, concurrency_limit=2)
+        count = await process_features_concurrently(sample_features, mock_session, master_results_list, mock_lock)
+
+        self.assertEqual(count, 2)
         expected = [
-            {'osm_id': 1, 'osm_type': 'node', 'tags': {'gnis:feature_id': '111'}, 'matched_wikidata_qid': 'Q111'},
-            {'osm_id': 3, 'osm_type': 'node', 'tags': {'gnis:feature_id': '333'}, 'matched_wikidata_qid': 'Q333'},
+            {'osm_type': 'node', 'osm_id': 1, 'gnis_id': '111', 'wikidata_id': 'Q111'},
+            {'osm_type': 'node', 'osm_id': 3, 'gnis_id': '333', 'wikidata_id': 'Q333'},
         ]
-        self.assertCountEqual(result, expected)
+        self.assertCountEqual(master_results_list, expected)
+
 
     @patch('find_osm_features.find_wikidata_entry_by_gnis_id', new_callable=AsyncMock)
     async def test_process_concurrently_with_exceptions(self, mock_find_wikidata):
+        mock_session = AsyncMock(spec=aiohttp.ClientSession)
+        master_results_list = []
+        mock_lock = AsyncMock(spec=asyncio.Lock)
         sample_features = [
-            {"id": 1, "type": "node", "tags": {"gnis:feature_id": "111"}},
-            {"id": 2, "type": "node", "tags": {"gnis:feature_id": "222"}},
-            {"id": 3, "type": "node", "tags": {"gnis:feature_id": "333"}},
+            {"type": "node", "id": 1, "tags": {"gnis:feature_id": "111"}},
+            {"type": "node", "id": 2, "tags": {"gnis:feature_id": "222"}}, # Will raise error
+            {"type": "node", "id": 3, "tags": {"gnis:feature_id": "333"}}, # No match
         ]
-        async def side_effect_func(session, gnis_id): # Async side_effect for mock
+        async def side_effect_func(session, gnis_id):
             if gnis_id == "111": return "Q111"
-            if gnis_id == "222": raise aiohttp.ClientError("Simulated API error") # Simulate an error
+            if gnis_id == "222": raise aiohttp.ClientError("Simulated API error")
             return None
         mock_find_wikidata.side_effect = side_effect_func
 
-        result = await process_features_concurrently(sample_features, concurrency_limit=3)
-        expected = [
-            {'osm_id': 1, 'osm_type': 'node', 'tags': {'gnis:feature_id': '111'}, 'matched_wikidata_qid': 'Q111'},
-        ]
-        self.assertCountEqual(result, expected)
+        count = await process_features_concurrently(sample_features, mock_session, master_results_list, mock_lock)
+
+        self.assertEqual(count, 1)
+        expected = [{'osm_type': 'node', 'osm_id': 1, 'gnis_id': '111', 'wikidata_id': 'Q111'}]
+        self.assertCountEqual(master_results_list, expected)
+
 
     @patch('find_osm_features.find_wikidata_entry_by_gnis_id', new_callable=AsyncMock)
     async def test_process_concurrently_chunking(self, mock_find_wikidata):
+        mock_session = AsyncMock(spec=aiohttp.ClientSession)
+        master_results_list = []
+        mock_lock = AsyncMock(spec=asyncio.Lock)
         sample_features = [
             {"id": i, "type": "node", "tags": {"gnis:feature_id": str(i)*3}} for i in range(1, 6) # 5 features
         ]
-        async def side_effect_func(session, gnis_id): # Async side_effect for mock
-            return f"Q{gnis_id}" # Simple mock return based on GNIS ID
+        async def side_effect_func(session, gnis_id):
+            return f"Q{gnis_id}"
         mock_find_wikidata.side_effect = side_effect_func
 
-        result = await process_features_concurrently(sample_features, concurrency_limit=2) # Test with concurrency < num_features
-        self.assertEqual(len(result), 5)
+        count = await process_features_concurrently(sample_features, mock_session, master_results_list, mock_lock, concurrency_limit=2)
+
+        self.assertEqual(count, 5)
+        self.assertEqual(len(master_results_list), 5)
         self.assertEqual(mock_find_wikidata.call_count, 5)
         expected_qids = {f"Q{str(i)*3}" for i in range(1,6)}
-        returned_qids = {item['matched_wikidata_qid'] for item in result}
+        returned_qids = {item['wikidata_id'] for item in master_results_list}
         self.assertSetEqual(returned_qids, expected_qids)
 
 if __name__ == '__main__':

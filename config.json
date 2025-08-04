@@ -1,0 +1,4 @@
+{
+  "BASE_OVERPASS_QUERY": "[out:csv(::type, ::id, \"gnis:feature_id\"; true; \"\\t\")][timeout:{timeout}];\n(\n  nwr[\"gnis:feature_id\"][!\"wikidata\"];\n);\nout;",
+  "SPARQL_QUERY": "SELECT ?item WHERE {{\n  ?item wdt:P590 \"{gnis_id}\" .\n}}"
+}

@@ -18,21 +18,39 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 class OverpassTimeoutError(Exception):
     pass
 
-# API endpoints and query templates.
-OVERPASS_API_URL = "https://overpass-api.de/api/interpreter"
-WIKIDATA_SPARQL_URL = "https://query.wikidata.org/sparql"
-BASE_OVERPASS_QUERY = """
-[out:csv(::type, ::id, "gnis:feature_id"; true; "\\t")][timeout:{timeout}];
-(
-  nwr["gnis:feature_id"][!"wikidata"];
-);
-out;
-"""
-SPARQL_QUERY = """
-SELECT ?item WHERE {{
-  ?item wdt:P590 "{gnis_id}" .
-}}
-"""
+# --- Configuration Loading ---
+
+def load_config(config_path='config.json'):
+    """Loads configuration from a JSON file."""
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        logging.error(f"Configuration file not found at {config_path}. Please create it.")
+        sys.exit(1)
+    except json.JSONDecodeError:
+        logging.error(f"Error decoding JSON from the configuration file: {config_path}")
+        sys.exit(1)
+
+# Load config at startup
+config = load_config()
+
+# API endpoints and query templates from config
+OVERPASS_API_URL = config.get("OVERPASS_API_URL", "https://overpass-api.de/api/interpreter")
+WIKIDATA_SPARQL_URL = config.get("WIKIDATA_SPARQL_URL", "https://query.wikidata.org/sparql")
+BASE_OVERPASS_QUERY = config.get("BASE_OVERPASS_QUERY")
+SPARQL_QUERY = config.get("SPARQL_QUERY")
+
+# Validate that essential queries are loaded
+if not all([BASE_OVERPASS_QUERY, SPARQL_QUERY]):
+    logging.error("BASE_OVERPASS_QUERY or SPARQL_QUERY is missing from the config file.")
+    sys.exit(1)
+
+# --- Script Constants ---
+PURGED_SHARED_GNIS_FILENAME = "purged_duplicate_gnis_features.json"
+PURGED_MULTI_ID_FILENAME = "gnis_ids_on_multiple_features.json"
+FINAL_RESULTS_FILENAME = "osm_features_to_update.json"
+CONCURRENCY_LIMIT = 5
 
 
 def save_data_atomically(data, filename, log_context):
@@ -270,11 +288,11 @@ async def process_features_concurrently(features_to_check, session, master_resul
     return newly_added_count
 
 
-async def fetch_and_prepare_osm_data(query_timeout):
-    """Fetches OSM data, handles deduplication, and filters features."""
+def fetch_raw_osm_data(query_timeout):
+    """Fetches raw OSM data from the Overpass API."""
     logging.info("Attempting to fetch new data from Overpass API. This may take some time...")
     try:
-        source_of_new_raw_data = fetch_osm_features_with_gnis_id(query_timeout)
+        return fetch_osm_features_with_gnis_id(query_timeout)
     except OverpassTimeoutError as e:
         logging.error(str(e))
         print(f"\nERROR: The Overpass API query timed out. Timeout: {query_timeout}s.")
@@ -284,21 +302,23 @@ async def fetch_and_prepare_osm_data(query_timeout):
         logging.error(f"An unexpected error occurred during Overpass API fetch: {e}")
         sys.exit(1)
 
-    if not source_of_new_raw_data:
-        logging.info("No Overpass data sourced. Returning empty.")
+def prepare_osm_data(raw_osm_data):
+    """Handles deduplication and filtering of raw OSM data."""
+    if not raw_osm_data:
+        logging.info("No raw OSM data to prepare. Returning empty.")
         return [], None, None
 
-    initial_total_features = len(source_of_new_raw_data)
+    initial_total_features = len(raw_osm_data)
 
     # Deduplication Stage 1: Purge OSM features if their GNIS ID is used by multiple OSM features.
     gnis_id_counts = collections.Counter(
-        f['tags']['gnis:feature_id'] for f in source_of_new_raw_data if f.get('tags', {}).get('gnis:feature_id')
+        f['tags']['gnis:feature_id'] for f in raw_osm_data if f.get('tags', {}).get('gnis:feature_id')
     )
     gnis_ids_to_purge_shared = {gnis_id for gnis_id, count in gnis_id_counts.items() if count > 1}
     purged_features_shared_gnis_json = []
     temp_features_after_shared_gnis_purge = []
 
-    for feature in source_of_new_raw_data:
+    for feature in raw_osm_data:
         gnis_id = feature.get('tags', {}).get('gnis:feature_id')
         if gnis_id and gnis_id in gnis_ids_to_purge_shared:
             purged_features_shared_gnis_json.append(feature)
@@ -311,7 +331,7 @@ async def fetch_and_prepare_osm_data(query_timeout):
                      f"{count_purged_due_to_shared_gnis} OSM features will be purged.")
         save_data_atomically(
             purged_features_shared_gnis_json,
-            'purged_duplicate_gnis_features.json',
+            PURGED_SHARED_GNIS_FILENAME,
             "purged features (shared GNIS)"
         )
 
@@ -331,7 +351,7 @@ async def fetch_and_prepare_osm_data(query_timeout):
         logging.info(f"Found {count_purged_due_to_multiple_ids_in_tag} features containing multiple GNIS IDs in their tag value; these will be purged.")
         save_data_atomically(
             features_with_multiple_ids_in_tag_list,
-            'gnis_ids_on_multiple_features.json',
+            PURGED_MULTI_ID_FILENAME,
             "features with multiple GNIS IDs in tag"
         )
 
@@ -371,7 +391,7 @@ async def process_wikidata_lookups(features_to_process_list, master_results_list
             session,
             master_results_list, # Passed by reference, updated in place.
             results_lock,
-            concurrency_limit=5 # Configurable concurrency.
+            concurrency_limit=CONCURRENCY_LIMIT # Use the constant
         )
 
         if count_newly_added > 0:
@@ -386,9 +406,9 @@ async def save_final_results_and_cleanup(final_results_list, purged_shared, purg
         try:
             # Sort results for consistent output, helpful for diffs and review.
             sorted_results = sorted(final_results_list, key=lambda x: (x.get('osm_id', 0), x.get('gnis_id', '')))
-            with open('osm_features_to_update.json', 'w', encoding='utf-8') as f:
+            with open(FINAL_RESULTS_FILENAME, 'w', encoding='utf-8') as f:
                 json.dump(sorted_results, f, indent=2)
-            logging.info(f"Saved {len(sorted_results)} total features to osm_features_to_update.json")
+            logging.info(f"Saved {len(sorted_results)} total features to {FINAL_RESULTS_FILENAME}")
         except IOError as e:
             logging.error(f"Error saving final results to JSON: {e}")
     else: # No results to save.
@@ -396,8 +416,8 @@ async def save_final_results_and_cleanup(final_results_list, purged_shared, purg
 
     # Consolidate saving of purged feature files.
     purged_data_to_save = [
-        (purged_shared, 'purged_duplicate_gnis_features.json', 'purged features (shared GNIS)'),
-        (purged_multi_id, 'gnis_ids_on_multiple_features.json', 'purged features (multiple GNIS IDs)')
+        (purged_shared, PURGED_SHARED_GNIS_FILENAME, 'purged features (shared GNIS)'),
+        (purged_multi_id, PURGED_MULTI_ID_FILENAME, 'purged features (multiple GNIS IDs)')
     ]
 
     for data, filename, context in purged_data_to_save:
@@ -414,24 +434,29 @@ async def main_async(query_timeout):
     """Main asynchronous function for the OSM feature processing workflow."""
     logging.info("Starting main asynchronous execution.")
 
+    # Step 1: Fetch raw data
+    raw_osm_data = fetch_raw_osm_data(query_timeout)
+
+    # Step 2: Prepare data (filter, deduplicate)
     (
         features_for_processing_this_run,
         purged_shared,
         purged_multi_id,
-    ) = await fetch_and_prepare_osm_data(query_timeout)
+    ) = prepare_osm_data(raw_osm_data)
+
 
     # Early exit if no features to process.
     if not features_for_processing_this_run:
         logging.info("No features to process this run. Exiting.")
         return
 
-    # Process Wikidata Lookups.
+    # Step 3: Process Wikidata Lookups.
     results = await process_wikidata_lookups(
         features_for_processing_this_run,
         [] # Start with an empty list of results.
     )
 
-    # Save final results.
+    # Step 4: Save final results.
     await save_final_results_and_cleanup(results, purged_shared, purged_multi_id)
 
 if __name__ == "__main__":

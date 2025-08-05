@@ -10,6 +10,7 @@ import sys
 import collections
 import csv
 import io
+from typing import List, Dict, Tuple, Optional, Any
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -20,26 +21,26 @@ class OverpassTimeoutError(Exception):
 
 # --- Configuration Loading ---
 
-def load_config(config_path='config.json'):
+def load_config(config_path: str = 'config.json') -> Dict[str, Any]:
     """Loads configuration from a JSON file."""
     try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
+        with open(config_path, 'r', encoding='utf-8') as config_file:
+            return json.load(config_file)
     except FileNotFoundError:
         logging.error(f"Configuration file not found at {config_path}. Please create it.")
         sys.exit(1)
-    except json.JSONDecodeError:
-        logging.error(f"Error decoding JSON from the configuration file: {config_path}")
+    except json.JSONDecodeError as exception:
+        logging.error(f"Error decoding JSON from the configuration file: {config_path}: {exception}")
         sys.exit(1)
 
 # Load config at startup
-config = load_config()
+config_data = load_config()
 
 # API endpoints and query templates from config
-OVERPASS_API_URL = config.get("OVERPASS_API_URL", "https://overpass-api.de/api/interpreter")
-WIKIDATA_SPARQL_URL = config.get("WIKIDATA_SPARQL_URL", "https://query.wikidata.org/sparql")
-BASE_OVERPASS_QUERY = config.get("BASE_OVERPASS_QUERY")
-SPARQL_QUERY = config.get("SPARQL_QUERY")
+OVERPASS_API_URL = config_data.get("OVERPASS_API_URL", "https://overpass-api.de/api/interpreter")
+WIKIDATA_SPARQL_URL = config_data.get("WIKIDATA_SPARQL_URL", "https://query.wikidata.org/sparql")
+BASE_OVERPASS_QUERY = config_data.get("BASE_OVERPASS_QUERY")
+SPARQL_QUERY = config_data.get("SPARQL_QUERY")
 
 # Validate that essential queries are loaded
 if not all([BASE_OVERPASS_QUERY, SPARQL_QUERY]):
@@ -53,24 +54,24 @@ FINAL_RESULTS_FILENAME = "osm_features_to_update.json"
 CONCURRENCY_LIMIT = 5
 
 
-def save_data_atomically(data, filename, log_context):
+def save_data_atomically(data: List[Dict[str, Any]], filename: str, log_context: str) -> None:
     """Saves data to a file atomically by writing to a temp file and then replacing."""
     if not data:
         return
 
-    temp_file = f"{filename}.tmp"
+    temp_filepath = f"{filename}.tmp"
     try:
-        with open(temp_file, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2)
-        os.replace(temp_file, filename)
+        with open(temp_filepath, 'w', encoding='utf-8') as json_file:
+            json.dump(data, json_file, indent=2)
+        os.replace(temp_filepath, filename)
         logging.info(f"Saved {len(data)} {log_context} to {filename}.")
-    except Exception as e:
-        logging.error(f"Error saving {log_context} to {filename}: {e}")
-        if os.path.exists(temp_file):
-            os.remove(temp_file)
+    except Exception as exception:
+        logging.error(f"Error saving {log_context} to {filename}: {exception}")
+        if os.path.exists(temp_filepath):
+            os.remove(temp_filepath)
 
 
-def fetch_osm_features_with_gnis_id(user_timeout):
+def fetch_osm_features_with_gnis_id(user_timeout: int) -> List[Dict[str, Any]]:
     """
     Fetches features from Overpass API based on BASE_OVERPASS_QUERY,
     expecting CSV output, and transforms them into a list of dicts.
@@ -102,17 +103,17 @@ def fetch_osm_features_with_gnis_id(user_timeout):
         return elements
     except requests.exceptions.Timeout:
         raise OverpassTimeoutError("Timeout fetching data from Overpass API.")
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error fetching data from Overpass API: {e}")
+    except requests.exceptions.RequestException as exception:
+        logging.error(f"Error fetching data from Overpass API: {exception}")
         return []
-    except csv.Error as e:
-        logging.error(f"Failed to parse CSV from Overpass API response: {e}")
+    except csv.Error as exception:
+        logging.error(f"Failed to parse CSV from Overpass API response: {exception}")
         return []
-    except Exception as e: # Catch any other unexpected errors
-        logging.error(f"An unexpected error occurred while processing Overpass data: {e}")
+    except Exception as exception: # Catch any other unexpected errors
+        logging.error(f"An unexpected error occurred while processing Overpass data: {exception}")
         return []
 
-async def find_wikidata_entry_by_gnis_id(session, gnis_id, max_retries=3):
+async def find_wikidata_entry_by_gnis_id(session: aiohttp.ClientSession, gnis_id: str, max_retries: int = 3) -> Optional[str]:
     for attempt in range(max_retries):
         try:
             async with session.get(WIKIDATA_SPARQL_URL, params={'query': SPARQL_QUERY.format(gnis_id=gnis_id), 'format': 'json'}) as response:
@@ -132,8 +133,8 @@ async def find_wikidata_entry_by_gnis_id(session, gnis_id, max_retries=3):
                 else:
                     logging.error(f"Error fetching Wikidata entry for GNIS ID {gnis_id}: HTTP {response.status}")
                     break
-        except aiohttp.ClientError as e:
-            logging.error(f"aiohttp error for GNIS ID {gnis_id}: {e}")
+        except aiohttp.ClientError as exception:
+            logging.error(f"aiohttp error for GNIS ID {gnis_id}: {exception}")
             break
         except asyncio.TimeoutError:
             logging.error(f"Timeout error for GNIS ID {gnis_id}")
@@ -146,9 +147,9 @@ async def find_wikidata_entry_by_gnis_id(session, gnis_id, max_retries=3):
 # Sentinel value for terminating the logging queue.
 LOGGING_SENTINEL = object()
 
-async def log_results_sequentially(results_queue, total_features_to_log):
+async def log_results_sequentially(results_queue: asyncio.Queue, total_features_to_log: int) -> None:
     """Consumes results from a queue, buffers, and logs them in sequential order."""
-    buffered_results = {}
+    buffered_results: Dict[int, Dict[str, Any]] = {}
     next_expected_log_index = 0
     logged_items_count = 0
 
@@ -202,13 +203,19 @@ async def log_results_sequentially(results_queue, total_features_to_log):
         logging.info(f"Logging task completed. All {logged_items_count}/{total_features_to_log} items logged.")
 
 
-async def process_features_concurrently(features_to_check, session, master_results_list, results_lock, concurrency_limit=5):
+async def process_features_concurrently(
+    features_to_check: List[Dict[str, Any]],
+    session: aiohttp.ClientSession,
+    master_results_list: List[Dict[str, Any]],
+    results_lock: asyncio.Lock,
+    concurrency_limit: int = 5
+) -> int:
     """Concurrently processes features, logs sequentially, updates master_results_list."""
     if not features_to_check:
         logging.info("No features for Wikidata lookup in this batch.")
         return 0
 
-    results_queue = asyncio.Queue()
+    results_queue: asyncio.Queue = asyncio.Queue()
     total_features = len(features_to_check)
 
     logging_task = asyncio.create_task(
@@ -218,7 +225,14 @@ async def process_features_concurrently(features_to_check, session, master_resul
     semaphore = asyncio.Semaphore(concurrency_limit)
     initial_master_results_len = len(master_results_list)
 
-    async def process_feature(feature, original_index, queue_to_put_on, http_session, current_master_results_list, current_results_lock):
+    async def process_feature(
+        feature: Dict[str, Any],
+        original_index: int,
+        queue_to_put_on: asyncio.Queue,
+        http_session: aiohttp.ClientSession,
+        current_master_results_list: List[Dict[str, Any]],
+        current_results_lock: asyncio.Lock
+    ) -> Dict[str, Any]:
         gnis_id = feature['tags']['gnis:feature_id']
         osm_type = feature['type']
         osm_id = feature['id']
@@ -240,9 +254,9 @@ async def process_features_concurrently(features_to_check, session, master_resul
                 async with results_lock: # Safely append to shared list.
                     master_results_list.append(feature_data)
 
-        except Exception as e:
-            logging.error(f"Exception during Wikidata lookup for GNIS ID {gnis_id} (idx: {original_index}): {e}", exc_info=False)
-            status = f"Error during lookup: {type(e).__name__}"
+        except Exception as exception:
+            logging.error(f"Exception during Wikidata lookup for GNIS ID {gnis_id} (idx: {original_index}): {exception}", exc_info=False)
+            status = f"Error during lookup: {type(exception).__name__}"
 
         # Data for logging queue.
         result_dict_for_logging = {
@@ -288,7 +302,7 @@ async def process_features_concurrently(features_to_check, session, master_resul
     return newly_added_count
 
 
-def fetch_raw_osm_data(query_timeout):
+def fetch_raw_osm_data(query_timeout: int) -> List[Dict[str, Any]]:
     """Fetches raw OSM data from the Overpass API."""
     logging.info("Attempting to fetch new data from Overpass API. This may take some time...")
     try:
@@ -298,21 +312,21 @@ def fetch_raw_osm_data(query_timeout):
         print(f"\nERROR: The Overpass API query timed out. Timeout: {query_timeout}s.")
         print("Consider increasing the timeout using the --timeout option.")
         sys.exit(1)
-    except Exception as e:
-        logging.error(f"An unexpected error occurred during Overpass API fetch: {e}")
+    except Exception as exception:
+        logging.error(f"An unexpected error occurred during Overpass API fetch: {exception}")
         sys.exit(1)
 
-def prepare_osm_data(raw_osm_data):
+def prepare_osm_data(raw_osm_data: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Handles deduplication and filtering of raw OSM data."""
     if not raw_osm_data:
         logging.info("No raw OSM data to prepare. Returning empty.")
-        return [], None, None
+        return [], [], []
 
     initial_total_features = len(raw_osm_data)
 
     # Deduplication Stage 1: Purge OSM features if their GNIS ID is used by multiple OSM features.
     gnis_id_counts = collections.Counter(
-        f['tags']['gnis:feature_id'] for f in raw_osm_data if f.get('tags', {}).get('gnis:feature_id')
+        feature['tags']['gnis:feature_id'] for feature in raw_osm_data if feature.get('tags', {}).get('gnis:feature_id')
     )
     gnis_ids_to_purge_shared = {gnis_id for gnis_id, count in gnis_id_counts.items() if count > 1}
     purged_features_shared_gnis_json = []
@@ -374,7 +388,7 @@ def prepare_osm_data(raw_osm_data):
     )
 
 
-async def process_wikidata_lookups(features_to_process_list, master_results_list):
+async def process_wikidata_lookups(features_to_process_list: List[Dict[str, Any]], master_results_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Processes features for Wikidata entries; `master_results_list` is updated in-place."""
     if not features_to_process_list:
         logging.info("No features provided for Wikidata lookup in this batch.")
@@ -400,7 +414,7 @@ async def process_wikidata_lookups(features_to_process_list, master_results_list
             logging.info("Wikidata lookup phase completed for this batch, no new results added.")
     return master_results_list # Return the (potentially modified) list.
 
-async def save_final_results_and_cleanup(final_results_list, purged_shared, purged_multi_id):
+async def save_final_results_and_cleanup(final_results_list: List[Dict[str, Any]], purged_shared: List[Dict[str, Any]], purged_multi_id: List[Dict[str, Any]]) -> None:
     """Saves final results and purged features to JSON files."""
     if final_results_list:
         try:
@@ -409,8 +423,8 @@ async def save_final_results_and_cleanup(final_results_list, purged_shared, purg
             with open(FINAL_RESULTS_FILENAME, 'w', encoding='utf-8') as f:
                 json.dump(sorted_results, f, indent=2)
             logging.info(f"Saved {len(sorted_results)} total features to {FINAL_RESULTS_FILENAME}")
-        except IOError as e:
-            logging.error(f"Error saving final results to JSON: {e}")
+        except IOError as exception:
+            logging.error(f"Error saving final results to JSON: {exception}")
     else: # No results to save.
         logging.info("No features with matching Wikidata entries found after processing.")
 
@@ -426,11 +440,11 @@ async def save_final_results_and_cleanup(final_results_list, purged_shared, purg
                 with open(filename, 'w', encoding='utf-8') as f:
                     json.dump(data, f, indent=2)
                 logging.info(f"Saved {len(data)} {context} to {filename}")
-            except IOError as e:
-                logging.error(f"Error saving {context} to {filename}: {e}")
+            except IOError as exception:
+                logging.error(f"Error saving {context} to {filename}: {exception}")
 
 
-async def main_async(query_timeout):
+async def main_async(query_timeout: int) -> None:
     """Main asynchronous function for the OSM feature processing workflow."""
     logging.info("Starting main asynchronous execution.")
 
@@ -468,33 +482,31 @@ if __name__ == "__main__":
         help="Timeout in seconds for Overpass API query. Prompts if not set."
     )
     args = parser.parse_args()
+    DEFAULT_TIMEOUT = 10000
 
     effective_timeout = args.timeout
-    DEFAULT_TIMEOUT = 10000
+    source_of_timeout = "CLI"
 
     if effective_timeout is None:
         try:
-            user_input_timeout_str = input(f"Enter Overpass API timeout in seconds (e.g., {DEFAULT_TIMEOUT}, Enter for default {DEFAULT_TIMEOUT}s): ").strip()
-            if not user_input_timeout_str: # User pressed Enter.
-                effective_timeout = DEFAULT_TIMEOUT
+            user_input = input(f"Enter Overpass API timeout in seconds (e.g., {DEFAULT_TIMEOUT}, Enter for default): ")
+            if user_input:
+                effective_timeout = int(user_input)
+                source_of_timeout = "user input"
             else:
-                effective_timeout = int(user_input_timeout_str)
-                if effective_timeout <= 0:
-                    logging.warning(f"Timeout must be positive. Using default {DEFAULT_TIMEOUT}s.")
-                    effective_timeout = DEFAULT_TIMEOUT
-                else:
-                    logging.info(f"User-defined Overpass API timeout: {effective_timeout}s.")
-        except ValueError: # Non-integer input.
+                effective_timeout = DEFAULT_TIMEOUT
+                source_of_timeout = "default"
+        except ValueError:
+            effective_timeout = DEFAULT_TIMEOUT
+            source_of_timeout = "default due to invalid input"
             logging.warning(f"Invalid timeout input. Using default {DEFAULT_TIMEOUT}s.")
-            effective_timeout = DEFAULT_TIMEOUT
-    else: # Timeout provided via CLI.
-        if effective_timeout <= 0:
-            logging.warning(f"CLI timeout --timeout {args.timeout} not positive. Using default {DEFAULT_TIMEOUT}s.")
-            effective_timeout = DEFAULT_TIMEOUT
-        else:
-            logging.info(f"Using Overpass API timeout from CLI: {effective_timeout}s.")
 
-    logging.info(f"Overpass API timeout for this session: {effective_timeout}s.")
+    # Validate the determined timeout
+    if effective_timeout <= 0:
+        logging.warning(f"Timeout from {source_of_timeout} ('{args.timeout or user_input}') is not positive. Using default {DEFAULT_TIMEOUT}s.")
+        effective_timeout = DEFAULT_TIMEOUT
+
+    logging.info(f"Using Overpass API timeout from {source_of_timeout}: {effective_timeout}s.")
 
     start_time = time.time()
     asyncio.run(main_async(effective_timeout)) # Run the main async workflow.
